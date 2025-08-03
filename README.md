@@ -10,6 +10,7 @@ NOLOcam is a sophisticated Go-based system for tracking and monitoring objects u
 
 TLDR: Dude hooked up AI to a PTZ camera and it works. 
 
+See it in action here: https://www.youtube.com/@MiamiRiverCamera/streams
 
 ## The Philosophy Behind AI-Integrated Systems
 
