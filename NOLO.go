@@ -1564,13 +1564,9 @@ func (m *FFmpegManager) WriteAsync(data []byte, frameNum int64) error {
 	case m.writeQueue <- timedFrame:
 		return nil // Successfully queued
 	default:
-		// Queue full - this indicates processing is falling behind
-		// Log warning but block to maintain frame order
-		debugMsgVerbose("FFMPEG_SEQUENCE", fmt.Sprintf("Write queue full - blocking to maintain frame order (frame %d)", frameNum))
-
-		// Block until we can queue the frame to maintain sequence
-		m.writeQueue <- timedFrame
-		return nil
+		// Queue full - DROP FRAME to prevent memory leak instead of blocking
+		debugMsgVerbose("FFMPEG_SEQUENCE", fmt.Sprintf("Write queue full - DROPPING frame %d to prevent memory leak (remote FFmpeg can't keep up)", frameNum))
+		return fmt.Errorf("write queue full - frame dropped")
 	}
 }
 

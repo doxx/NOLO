@@ -1178,8 +1178,8 @@ func (r *Renderer) DrawPIPZoom(img *gocv.Mat, originalFrame gocv.Mat, trackedObj
 			if !roi.Empty() {
 				defer roi.Close()
 
-				// Apply 2x digital zoom by cropping the center of the ROI
-				zoomFactor := 2.0
+				// Apply 1.4x digital zoom by cropping the center of the ROI (reduced from 2.0x)
+				zoomFactor := 1.4
 				roiWidth := roi.Cols()
 				roiHeight := roi.Rows()
 
@@ -1225,8 +1225,8 @@ func (r *Renderer) DrawPIPZoom(img *gocv.Mat, originalFrame gocv.Mat, trackedObj
 				finalROI := gocv.NewMat()
 				defer finalROI.Close()
 
-				// Use Lanczos4 interpolation for superior upscaling quality (now that debug overhead is eliminated)
-				gocv.Resize(zoomedROI, &finalROI, image.Pt(contentRect.Dx(), contentRect.Dy()), 0, 0, gocv.InterpolationLanczos4)
+				// Use Linear interpolation to test for Lanczos4 memory leak
+				gocv.Resize(zoomedROI, &finalROI, image.Pt(contentRect.Dx(), contentRect.Dy()), 0, 0, gocv.InterpolationLinear)
 
 				// Apply fade to the video content
 				if finalAlpha < 1.0 {
@@ -1281,7 +1281,7 @@ func (r *Renderer) DrawPIPZoom(img *gocv.Mat, originalFrame gocv.Mat, trackedObj
 		)
 		// Calculate total zoom: (PIP size / original object size) * digital zoom factor
 		baseZoom := float64(pipWidth) / float64(objectRect.Dx())
-		digitalZoom := 2.0 // Our digital zoom factor
+		digitalZoom := 1.4 // Our digital zoom factor (reduced from 2.0)
 		totalZoom := baseZoom * digitalZoom
 
 		zoomText := fmt.Sprintf("%.1fX DIGITAL ZOOM", totalZoom)
@@ -2479,6 +2479,17 @@ func (om *ObjectMeasurements) AddMeasurement(speed, height, width, length, direc
 
 	// Cleanup old samples (older than 5 minutes to prevent unlimited growth)
 	om.cleanupOldSamples(5 * time.Minute)
+
+	// EMERGENCY: If still too many samples after time-based cleanup, keep only recent ones
+	if len(om.SpeedHistory) > 1000 { // Emergency cap to prevent memory leaks
+		keepRecent := 500 // Keep 500 most recent samples
+		om.SpeedHistory = om.SpeedHistory[len(om.SpeedHistory)-keepRecent:]
+		om.HeightHistory = om.HeightHistory[len(om.HeightHistory)-keepRecent:]
+		om.WidthHistory = om.WidthHistory[len(om.WidthHistory)-keepRecent:]
+		om.LengthHistory = om.LengthHistory[len(om.LengthHistory)-keepRecent:]
+		om.DirectionHistory = om.DirectionHistory[len(om.DirectionHistory)-keepRecent:]
+		om.SampleTimes = om.SampleTimes[len(om.SampleTimes)-keepRecent:]
+	}
 }
 
 // cleanupOldSamples removes measurements older than maxAge to prevent unlimited memory growth
@@ -2744,8 +2755,14 @@ func (om *ObjectMeasurements) GetDebugData() map[string]interface{} {
 func (r *Renderer) cleanupStaleMeasurements(debugMode bool, debugManager interface{}) {
 	now := time.Now()
 
-	// Only cleanup every 30 seconds to avoid excessive processing
-	if now.Sub(r.lastCleanupTime) < 30*time.Second {
+	// More frequent cleanup during active processing to prevent memory leaks
+	// Normal: 30s, but 5s during active tracking to prevent PIP memory accumulation
+	cleanupInterval := 30 * time.Second
+	if len(r.objectMeasurements) > 5 { // Active tracking happening
+		cleanupInterval = 5 * time.Second // More frequent cleanup during PIP/tracking
+	}
+
+	if now.Sub(r.lastCleanupTime) < cleanupInterval {
 		return
 	}
 
@@ -2921,4 +2938,38 @@ func (r *Renderer) drawEnhancedYOLOPanel(img gocv.Mat, detections []image.Rectan
 
 	infoText := fmt.Sprintf("Avg confidence: %.0f%% | History: %d", avgConf*100, len(r.yoloDetectionHistory))
 	gocv.PutText(&img, infoText, image.Point{panelX + 10, statsY + 25}, gocv.FontHersheySimplex, 0.35, whiteText, 1)
+}
+
+// ClearAllObjectData clears all objectID tracking data when transitioning RECOVER → SCANNING
+// This prevents memory leaks from accumulating dead objectID data
+func (r *Renderer) ClearAllObjectData(reason string) {
+	if r.boatSpeedData == nil && r.objectMeasurements == nil && r.targetDisplayBuffer == nil {
+		return // Nothing to clear
+	}
+
+	// Count what we're clearing for logging
+	speedTrackers := len(r.boatSpeedData)
+	measurements := len(r.objectMeasurements)
+	displayBuffers := len(r.targetDisplayBuffer)
+
+	// Clear all renderer tracking maps
+	r.boatSpeedData = make(map[string]*SimpleSpeedTracker)
+	r.objectMeasurements = make(map[string]*ObjectMeasurements)
+	r.targetDisplayBuffer = make(map[int]*TargetDisplayData)
+
+	// Clear PIP coordinates since target is lost
+	r.lastKnownCoords = nil
+	r.pipVisible = false
+
+	// Clear decision history
+	r.decisionHistory = make([]DecisionLogEntry, 0)
+
+	// Clear any cached target data
+	r.lastTrackedTarget = nil
+
+	// Log the cleanup
+	if debugMsg != nil {
+		debugMsg("MEMORY_CLEANUP", fmt.Sprintf("🧹 Cleared ALL objectID data: %d speed trackers, %d measurements, %d display buffers. Reason: %s",
+			speedTrackers, measurements, displayBuffers, reason))
+	}
 }
