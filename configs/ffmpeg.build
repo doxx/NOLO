@@ -1,0 +1,39 @@
+PKG_CONFIG_PATH="$HOME/ffmpeg_build/lib/pkgconfig" ./configure \
+  --prefix="$HOME/ffmpeg_build" \
+  --bindir="$HOME/bin" \
+  --extra-cflags="-I$HOME/ffmpeg_build/include -I/usr/include" \
+  --extra-ldflags="-L$HOME/ffmpeg_build/lib -L/usr/lib/x86_64-linux-gnu" \
+  --extra-libs="-lpthread -lm -ldl" \
+  --enable-gpl \
+  --enable-nonfree \
+  --enable-cuda-nvcc \
+  --nvcc="/usr/bin/nvcc" \
+  --enable-cuvid \
+  --enable-nvdec \
+  --enable-nvenc \
+  --enable-shared \
+  --enable-network \
+  --enable-protocol=rtmp \
+  --enable-muxer=flv \
+  --enable-libx264 \
+  --disable-debug \
+  --disable-doc \
+  --disable-ffplay
+
+also install 
+
+cd ~/ffmpeg-build
+
+# Clone the official NVIDIA codec headers
+git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
+cd nv-codec-headers
+
+# Check what version we're getting
+git log --oneline -5
+
+# Build and install
+make install PREFIX="$HOME/ffmpeg_build"
+
+# Verify the headers were installed
+ls -la ~/ffmpeg_build/include/
+ls -la ~/ffmpeg_build/include/ffnvcodec/ 2>/dev/null || echo "Headers not found"

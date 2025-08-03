@@ -1,0 +1,14 @@
+[Service]
+ExecStart=/usr/local/bin/srs -c /etc/srs/srs.conf
+WorkingDirectory=/usr/local
+User=root
+Restart=always
+RestartSec=5
+LimitNOFILE=100000
+ProtectSystem=off
+ProtectHome=off
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,51 @@
+# Binaries
+bin/
+NOLO
+rivercam
+*/scanning_recorder
+*/ai_commentary
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Go specific
+*.test
+*.prof
+coverage.out
+
+# Environment files (may contain secrets)
+.env
+*.env.local
+
+# Logs
+*.log
+logs/
+
+# Runtime data
+*.pid
+*.seed
+*.pid.lock
+
+# Temporary files
+tmp/
+temp/ 

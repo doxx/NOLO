@@ -1,0 +1,34 @@
+{
+  "max_restarts": 999999,
+  "health_timeout_seconds": 15,
+  "restart_delay_seconds": 1,
+  "log_file": "broadcast.log",
+  
+  "enable_local_recording": false,
+  "recording_path": "./recordings",
+  "segment_duration_seconds": 3600,
+  "max_recording_days": 7,
+  "create_playlist": true,
+  
+  "ffmpeg_args": [
+    "-re",
+    "-thread_queue_size", "1024",
+    "-i", "rtmp://192.168.0.12/live/stream",
+    "-thread_queue_size", "512", 
+    "-i", "rtsp://admin:password1@192.168.0.59:554/Streaming/Channels/202",
+    "-map", "0:v:0", "-map", "1:a:0",
+    "-fflags", "+genpts+discardcorrupt+flush_packets",
+    "-r", "30", "-g", "60", "-keyint_min", "60",
+    "-vf", "scale=2560:1440,",
+    "-c:v", "h264_nvenc", "-preset", "p7", "-profile:v", "high",
+    "-b:v", "16000k", "-maxrate", "18000k", "-bufsize", "2G",
+    "-rc", "vbr", "-cq", "23", "-spatial_aq", "1", "-temporal_aq", "1",
+    "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*2)",
+    "-rtbufsize", "2G",
+    "-max_delay", "9000000",
+    "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000", "-af", "volume=0.5",
+    "-async", "0",
+    "-f", "flv", "rtmp://a.rtmp.youtube.com/live2/hv9f-xv8d-8vq3-fg7f-3gub",
+    "-c:v", "copy", "-c:a", "aac", "-f", "segment", "-segment_time", "3600", "-segment_format", "mp4", "-strftime", "1", "./recordings/cam_%Y%m%d_%H%M%S.mp4"
+  ]
+} 

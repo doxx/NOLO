@@ -1,0 +1,14 @@
+Zoom Calibration Results:
+Zoom Range	Pixels Toward Center	Pixels per Zoom Unit
+10 → 20	120px	12.0 px/unit
+20 → 30	288px	28.8 px/unit
+30 → 40	210px	21.0 px/unit
+40 → 50	180px	18.0 px/unit
+50 → 60	80px	8.0 px/unit
+60 → 70	119px	11.9 px/unit
+70 → 80	140px	14.0 px/unit
+80 → 90	140px	14.0 px/unit
+90 → 100	140px	14.0 px/unit
+100 → 110	170px	17.0 px/unit
+110 → 120	190px	19.0 px/unit
+
