@@ -989,6 +989,7 @@ func (r *Renderer) DrawPIPZoom(img *gocv.Mat, originalFrame gocv.Mat, trackedObj
 		// SMART DISABLE: Camera moving + no YOLO + past minimum display = immediate disable
 		if cameraMoving && !inMinDisplayPeriod {
 			r.pipVisible = false
+			r.lastKnownCoords = nil // MEMORY LEAK FIX: Clear coordinates when PIP disabled
 			if shouldDebugPIP {
 				if debugMsg != nil {
 					debugMsg("PIP_STATE", "📺🚫 PIP disabled - camera moving, past minimum display time")
@@ -997,6 +998,7 @@ func (r *Renderer) DrawPIPZoom(img *gocv.Mat, originalFrame gocv.Mat, trackedObj
 		} else if !inMinDisplayPeriod && !inLingerPeriod {
 			// Past both minimum display and linger time - disable PIP
 			r.pipVisible = false
+			r.lastKnownCoords = nil // MEMORY LEAK FIX: Clear coordinates when PIP disabled
 			if shouldDebugPIP {
 				if debugMsg != nil {
 					debugMsg("PIP_STATE", "📺⏰ PIP disabled - past minimum display (5s) and linger time (5s)")
@@ -1060,6 +1062,7 @@ func (r *Renderer) DrawPIPZoom(img *gocv.Mat, originalFrame gocv.Mat, trackedObj
 			}
 		}
 		r.pipVisible = false
+		r.lastKnownCoords = nil // MEMORY LEAK FIX: Clear coordinates when PIP disabled
 		return
 	}
 
