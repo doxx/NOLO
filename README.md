@@ -231,7 +231,7 @@ Moving to the GPU off the CPU was a huge win, however that came with its own iss
 
 I also did not take the time to use on/off movements which are much smoother than the absolute ones, and I really don't have the time to do that right now, also I could not get the Hikvision camera to manage speed dynamically because of the API doing some strange shit. If anyone at Hikvision can help, please shoot me a note.
 
-## 🏗️ NOLO Pipeline Architecture
+## NOLO Pipeline Architecture
 
 ### Main Processing Pipeline
 
@@ -477,7 +477,7 @@ Buffer Management:
 └─── Drop policy: Oldest first
 ```
 
-## 🎯 The Technical Challenge: Why PTZ AI is Exponentially Harder
+## The Technical Challenge: Why PTZ AI is Exponentially Harder
 
 ### **Fixed Camera vs. PTZ: A Complexity Analysis**
 
@@ -499,10 +499,10 @@ At 2600×1426 resolution, this creates **~1.34 quadrillion unique pixel-position
 ### **Why This Matters: The Real Challenges**
 
 **Fixed Camera Approach:**
-- ✅ Single scene, consistent perspective
-- ✅ Static object relationships  
-- ✅ Simple "digital zoom" on existing pixels
-- ✅ One-time calibration
+- Single scene, consistent perspective
+- Static object relationships  
+- Simple "digital zoom" on existing pixels
+- One-time calibration
 
 **PTZ Camera Reality (This Project):**
 - 🔥 **360+ million different scenes** based on camera position
@@ -528,7 +528,7 @@ While most PTZ projects are simple "move camera toward detected object" systems,
 Okay on to the software... 
 
 
-## 🚀 Key Features
+## Key Features
 
 ### **Flexible Tracking Priority System**
 - **P1 Objects** (Primary): Main tracking targets that can achieve LOCK status
@@ -560,7 +560,7 @@ Okay on to the software...
 - **Granular Overlay Control**: Enable/disable specific overlay elements
 - **Performance Monitoring**: Real-time FPS and latency tracking
 
-## 🏆 What Sets This Apart from Other AI Camera Projects
+## What Sets This Apart from Other AI Camera Projects
 
 ### **Beyond Typical Computer Vision Demos**
 
@@ -598,7 +598,7 @@ Most AI camera tracking projects online are **proof-of-concept Python scripts** 
 
 **The bottom line**: While others build demos, this project solves the **real engineering challenges** of autonomous camera systems - the foundation for next-generation surveillance, security, and monitoring applications.
 
-## 🎛️ Configuration Options
+## Configuration Options
 
 ### **Complete Command-Line Reference**
 
@@ -757,7 +757,7 @@ Usage of ./NOLO:
 -masktolerance=50              # Color tolerance (0-255)
 ```
 
-## 📋 Prerequisites
+## Prerequisites
 
 - **Go 1.19+**
 - **OpenCV 4.x** with Go bindings (`gocv`)
@@ -766,7 +766,7 @@ Usage of ./NOLO:
 - **RTSP Stream**: Camera video feed
 - **Optional**: CUDA for GPU acceleration
 
-## 🤖 YOLO Object Detection Models & Capabilities
+## YOLO Object Detection Models & Capabilities
 
 ### **Supported YOLO Models**
 
@@ -802,7 +802,7 @@ The system can detect and track **80 different object types** from the COCO data
 **🌱 Plants & Environment:**
 - pottedplant
 
-**🛠️ Tools & Household:**
+**Tools & Household:**
 - scissors, hair drier, toothbrush, clock, vase, book, teddy bear
 
 **🚦 Infrastructure:**
@@ -830,16 +830,16 @@ models/
 ### **Performance Characteristics**
 
 **YOLOv3-tiny:**
-- ✅ **CPU-optimized**: Runs efficiently on modest hardware
-- ✅ **Low latency**: ~15-30ms inference time
-- ✅ **Small model**: 34MB weights file
-- ⚠️ **Trade-off**: Slightly lower accuracy than full models
+- **CPU-optimized**: Runs efficiently on modest hardware
+- **Low latency**: ~15-30ms inference time
+- **Small model**: 34MB weights file
+- **Trade-off**: Slightly lower accuracy than full models
 
 **YOLOv8n (nano):**
-- ✅ **GPU-accelerated**: Leverages CUDA when available  
-- ✅ **Better accuracy**: Improved detection performance
-- ✅ **ONNX format**: Cross-platform compatibility
-- ⚠️ **Requires**: More computational resources
+- **GPU-accelerated**: Leverages CUDA when available  
+- **Better accuracy**: Improved detection performance
+- **ONNX format**: Cross-platform compatibility
+- **Requires**: More computational resources
 
 ### **Detection Configuration**
 
@@ -857,12 +857,14 @@ The system processes video at **832×832 resolution** for YOLO inference with sm
 -p1-track="car,truck,bus" -p2-track="person,bicycle"
 ```
 
-## 🔧 Installation
+## Installation
+
+### Quick Start (Development)
 
 1. **Clone the repository:**
 ```bash
-git clone https://github.com/doxx/NOLOcam.git
-cd NOLOcam
+git clone https://github.com/doxx/NOLO.git
+cd NOLO
 ```
 
 2. **Install dependencies:**
@@ -883,6 +885,56 @@ go mod download
 5. **Build the application:**
 ```bash
 go build .
+```
+
+### Production Server Deployment
+
+For full production deployment with GPU acceleration, CUDA, OpenCV, FFmpeg, SRS, and systemd services, see the comprehensive **[Server Deployment Guide](DEPLOYMENT.md)**.
+
+The deployment guide covers:
+- **NVIDIA Driver & CUDA** - Driver installation, Secure Boot considerations, CUDA toolkit setup
+- **OpenCV with CUDA** - Building OpenCV 4.x from source with cuDNN and GPU acceleration
+- **FFmpeg with NVENC** - Building FFmpeg 7.x with hardware encoding for your GPU architecture
+- **Go & GoCV** - Proper CGO flags and pkg-config setup for OpenCV bindings
+- **SRS RTMP Server** - Local RTMP relay for the broadcast pipeline
+- **Systemd Services** - Auto-start configuration for `srs`, `nolo`, and `nolo-broadcast`
+- **YouTube Broadcast** - Audio mixing and re-encoding pipeline to YouTube Live
+- **Troubleshooting** - Common issues with GPU detection, NVENC, OpenCV, and networking
+
+#### Architecture Overview
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   PTZ Camera    │────▶│      NOLO       │────▶│   SRS Server    │
+│   (RTSP/PTZ)    │     │  (AI Tracking)  │     │  (RTMP Relay)   │
+└─────────────────┘     └─────────────────┘     └────────┬────────┘
+                                                         │
+                        ┌─────────────────┐              │
+                        │    Broadcast    │◀─────────────┘
+                        │  (Audio Mix +   │
+                        │   Re-encode)    │
+                        └────────┬────────┘
+                                 │
+                        ┌────────▼────────┐
+                        │    YouTube      │
+                        │   Live Stream   │
+                        └─────────────────┘
+```
+
+#### Quick Service Commands
+
+```bash
+# Start all services
+sudo systemctl start srs nolo nolo-broadcast
+
+# Check status
+sudo systemctl status srs nolo nolo-broadcast
+
+# View live logs
+journalctl -u nolo -f
+
+# Restart after config changes
+sudo systemctl restart nolo nolo-broadcast
 ```
 
 ## AI Commentator: Captain BlackEye's Untapped Potential
@@ -1017,7 +1069,7 @@ The gap between "AI that detects boats" and "AI that understands maritime behavi
 
 For accurate PTZ tracking, the system must understand the precise relationship between pixel movement on screen and actual camera motor movement. This relationship **changes dramatically with zoom level** - at 10x zoom, moving 100 pixels might require 20 camera units, but at 120x zoom, the same 100 pixels might only require 3 camera units.
 
-### **🛠️ Three Calibration Methods Available**
+### **Three Calibration Methods Available**
 
 #### **1. Manual Hand Calibration** _(Most Precise for Pan/Tilt)_
 
@@ -1063,9 +1115,9 @@ go build -o scanning_recorder
 
 **Interactive workflow:**
 ```
-🎯 Position camera at "river_left" → ENTER → Set dwell time: 15 seconds
-🎯 Position camera at "bridge_center" → ENTER → Set dwell time: 10 seconds  
-🎯 Position camera at "dock_area" → ENTER → Set dwell time: 20 seconds
+Position camera at "river_left" → ENTER → Set dwell time: 15 seconds
+Position camera at "bridge_center" → ENTER → Set dwell time: 10 seconds  
+Position camera at "dock_area" → ENTER → Set dwell time: 20 seconds
 Type 'done' → Saves to scanning.json
 ```
 
@@ -1093,7 +1145,7 @@ For each zoom level:
 3. User opens photo, measures 369-inch reference in pixels
 4. System calculates conversion: `pixels ÷ 369 inches = pixels-per-inch`
 
-### **📊 Calibration Data Integration**
+### **Calibration Data Integration**
 
 #### **Current Hardcoded Values** _(Will be replaced by calibration files)_
 ```go
@@ -1126,13 +1178,13 @@ tiltAdjustment := float64(pixelOffsetY) / tiltPixelsPerUnit
 // Result: Precise camera movement to center detected object
 ```
 
-### **🎯 Calibration Accuracy Impact**
+### **Calibration Accuracy Impact**
 
 **Poor calibration** → Objects drift off-screen, tracking failures  
 **Good calibration** → Smooth tracking, objects stay centered  
 **Excellent calibration** → Rock-solid lock, imperceptible tracking adjustments
 
-### **📁 Generated Files**
+### **Generated Files**
 
 | Tool | Output File | Purpose |
 |------|-------------|---------|
@@ -1149,7 +1201,7 @@ Each calibration method generates JSON files that the tracking system loads for 
 
 Professional live streaming requires **rock-solid reliability** - any interruption, freeze, or crash results in lost viewers and revenue. Traditional FFmpeg scripts often fail silently, hang indefinitely, or crash without recovery. The NOLO broadcast system solves this with enterprise-grade monitoring and automatic recovery.
 
-### **🎬 How the Broadcast Monitor Works**
+### **How the Broadcast Monitor Works**
 
 #### **Intelligent Stream Mixing**
 The broadcast system combines **two video sources** into a single professional stream:
@@ -1168,7 +1220,7 @@ Different encoding configurations for various hardware setups:
 | `broadcast_config_nvidia_nodrawtext.json` | **GPU No Overlay** | `h264_nvenc` | Raw feed without AI commentary |
 | `broadcast_config_darwin.json` | **macOS** | Platform-optimized | Apple development |
 
-### **⚡ Key Features**
+### **Key Features**
 
 #### **🔍 Process Health Monitoring**
 ```go
@@ -1186,7 +1238,7 @@ Different encoding configurations for various hardware setups:
 - **Graceful shutdown** handling (SIGTERM → SIGKILL if needed)
 - **State preservation** across restarts
 
-#### **📊 Advanced Stream Configuration**
+#### **Advanced Stream Configuration**
 ```json
 {
   "max_restarts": 999999,
@@ -1205,7 +1257,7 @@ Different encoding configurations for various hardware setups:
 }
 ```
 
-### **🛠️ Usage Guide** 
+### **Usage Guide** 
 
 #### **Build & Run**
 ```bash
@@ -1226,7 +1278,7 @@ cd broadcast
 nohup ./broadcast-monitor > /dev/null 2>&1 &
 ```
 
-### **🏗️ Architecture Overview**
+### **Architecture Overview**
 
 #### **Stream Processing Pipeline**
 ```
@@ -1262,7 +1314,7 @@ NOLO AI Tracking → RTMP Stream
 }
 ```
 
-### **📊 Monitoring & Logging**
+### **Monitoring & Logging**
 
 The broadcast monitor provides comprehensive visibility:
 - **Frame processing statistics** (every 30 seconds)
@@ -1276,9 +1328,9 @@ This production-grade approach ensures your AI-powered streams maintain professi
 
 
 
-## 🔒 Security Considerations
+## Security Considerations
 
-### ⚠️ **Critical Security Warning**
+### **Critical Security Warning**
 
 **This system operates with multiple unencrypted communication channels that transmit credentials in plaintext:**
 
@@ -1288,7 +1340,7 @@ This production-grade approach ensures your AI-powered streams maintain professi
 | **HTTP Camera Control** | 80 | Plaintext Basic Auth | 🔴 **HIGH** |
 | **RTMP** | 1935 | No encryption | 🟡 **MEDIUM** |
 
-### 🚨 **Plaintext Credential Transmission**
+### **Plaintext Credential Transmission**
 
 **All camera communications send usernames and passwords in plaintext:**
 
@@ -1304,10 +1356,10 @@ http://user:password123@192.168.1.100:80/
 - PTZ control commands
 - Administrative access tokens
 
-### ✅ **Appropriate Use Cases**
+### **Appropriate Use Cases**
 
 ```bash
-# ✅ Suitable for:
+# Suitable for:
 - Private property monitoring (isolated networks)
 - Development and testing environments
 - Proof-of-concept demonstrations
@@ -1315,7 +1367,7 @@ http://user:password123@192.168.1.100:80/
 - Education and learning (controlled environments)
 ```
 
-## 🎮 Usage Examples
+## Usage Examples
 
 ### **Basic River Monitoring**
 ```bash
@@ -1363,7 +1415,7 @@ http://user:password123@192.168.1.100:80/
   -post-overlay-jpg
 ```
 
-## 📊 Understanding the Output
+## Understanding the Output
 
 NOLO provides rich debugging information:
 
@@ -1371,14 +1423,14 @@ NOLO provides rich debugging information:
 [TRACKING_CONFIG] P1 (Primary): [boat kayak]
 [TRACKING_CONFIG] P2 (Enhancement): [person backpack]
 
-📊 Frame 1250: YOLO detected 2 boats, 1 people, 0 others
-🎯 Boat boat_123 gets +0.7 priority for having 1 P2 objects!
-🔒 Target boat boat_123 LOCKED for camera tracking (mature target)!
+Frame 1250: YOLO detected 2 boats, 1 people, 0 others
+Boat boat_123 gets +0.7 priority for having 1 P2 objects!
+Target boat boat_123 LOCKED for camera tracking (mature target)!
 👤📺 Using LOCK target with P2 objects (det:15, lost:0) for PIP
 🎯👤 Using P2 centroid (1245,680) for tracking - 1 P2 objects, quality 0.85
 ```
 
-## 🏷️ Supported Object Types
+## Supported Object Types
 
 **Common P1 (Primary) Objects:**
 - `boat` - Motor boats, sailboats, yachts
@@ -1394,14 +1446,14 @@ NOLO provides rich debugging information:
 - `chair` - Seating, furniture
 - `all` - Any non-P1 object
 
-## 📁 Configuration Files
+## Configuration Files
 
 - **`scanning.json`**: Camera scan pattern definitions
 - **`pixels-inches-cal.json`**: Spatial calibration data
 - **`coco.names`**: YOLO class labels
 - **`models/yolov8n.onnx`**: YOLO detection model
 
-## 🐛 Debug Features
+## Debug Features
 
 - **Debug Overlay**: Real-time tracking visualization
 - **Verbose Mode**: Detailed YOLO, calibration, and tracking calculations
@@ -1411,12 +1463,12 @@ NOLO provides rich debugging information:
 - **Session Logs**: Per-object tracking history
 - **JPEG Capture**: Organized frame saving by date/hour
 
-## 🤝 Contributing
+## Contributing
 
 Join us on Discord: https://discord.gg/Gr9rByrEzZ
 
 
-## 📄 License
+## License
 
 ### **NOLO Ethical AI License (Based on MIT)**
 
@@ -1424,47 +1476,47 @@ Join us on Discord: https://discord.gg/Gr9rByrEzZ
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction for **non-commercial, ethical, and educational purposes**, subject to the following conditions:
 
-### ✅ **Permitted Uses**
-- ✅ **Personal projects and research**
-- ✅ **Educational and academic purposes**  
-- ✅ **Open source contributions and improvements**
-- ✅ **Wildlife and environmental monitoring**
-- ✅ **Property security (private, residential)**
-- ✅ **Technology demonstrations and prototyping**
-- ✅ **Non-profit organizational use**
+### **Permitted Uses**
+- **Personal projects and research**
+- **Educational and academic purposes**  
+- **Open source contributions and improvements**
+- **Wildlife and environmental monitoring**
+- **Property security (private, residential)**
+- **Technology demonstrations and prototyping**
+- **Non-profit organizational use**
 
-### 🚫 **Strictly Prohibited Uses**
+### **Strictly Prohibited Uses**
 
 The following uses are **explicitly prohibited** under this license:
 
 #### **Commercial Restrictions**
-- 🚫 **Commercial deployment** without explicit written license from Barrett Lyon
-- 🚫 **Revenue-generating activities** using this software
-- 🚫 **Integration into commercial products** or services
-- 🚫 **Corporate surveillance systems**
-- 🚫 **Paid consulting services** using this codebase
+- **Commercial deployment** without explicit written license from Barrett Lyon
+- **Revenue-generating activities** using this software
+- **Integration into commercial products** or services
+- **Corporate surveillance systems**
+- **Paid consulting services** using this codebase
 
 #### **Ethical and Human Rights Restrictions**
-- 🚫 **Facial recognition or biometric identification** of any kind
-- 🚫 **Human tracking, profiling, or behavioral analysis**
-- 🚫 **Surveillance that violates privacy rights** or reasonable expectation of privacy
-- 🚫 **Discriminatory targeting** based on race, religion, gender, nationality, or other protected characteristics
-- 🚫 **Mass surveillance programs** or bulk data collection
-- 🚫 **Stalking, harassment, or intimidation** of individuals
+- **Facial recognition or biometric identification** of any kind
+- **Human tracking, profiling, or behavioral analysis**
+- **Surveillance that violates privacy rights** or reasonable expectation of privacy
+- **Discriminatory targeting** based on race, religion, gender, nationality, or other protected characteristics
+- **Mass surveillance programs** or bulk data collection
+- **Stalking, harassment, or intimidation** of individuals
 
 #### **Military and Security Restrictions**
-- 🚫 **Military applications** or defense contractor use
-- 🚫 **Weapons systems integration** or targeting assistance
-- 🚫 **Border security or immigration enforcement**
-- 🚫 **Law enforcement surveillance** without proper judicial oversight
-- 🚫 **Intelligence gathering operations**
+- **Military applications** or defense contractor use
+- **Weapons systems integration** or targeting assistance
+- **Border security or immigration enforcement**
+- **Law enforcement surveillance** without proper judicial oversight
+- **Intelligence gathering operations**
 
 #### **Harmful Applications**
-- 🚫 **Any use that could cause physical or psychological harm** to individuals
-- 🚫 **Tracking of vulnerable populations** (children, elderly, disabled, refugees)
-- 🚫 **Social credit scoring** or behavioral modification systems
+- **Any use that could cause physical or psychological harm** to individuals
+- **Tracking of vulnerable populations** (children, elderly, disabled, refugees)
+- **Social credit scoring** or behavioral modification systems
 
-### 📝 **License Conditions**
+### **License Conditions**
 
 1. **Attribution Required**: The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
@@ -1474,21 +1526,21 @@ The following uses are **explicitly prohibited** under this license:
 
 5. **Immediate Termination**: Any violation of the prohibited uses immediately terminates your rights under this license.
 
-### ⚖️ **Legal Disclaimer**
+### **Legal Disclaimer**
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-### 📧 **Commercial Licensing Contact**
+### **Commercial Licensing Contact**
 
 For commercial licensing inquiries, please contact:  
 **Barrett Lyon** - blyon@blyon.com
 
 
-## 🙏 Credits & Acknowledgments
+## Credits & Acknowledgments
 
 This project stands on the shoulders of giants. NOLO would not be possible without the incredible work of these open source communities and organizations:
 
-### 🤖 **AI & Computer Vision**
+### **AI & Computer Vision**
 
 **[Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics)**
 - The foundation of our object detection system
@@ -1505,7 +1557,7 @@ This project stands on the shoulders of giants. NOLO would not be possible witho
 - Microsoft's contribution to computer vision research
 - Essential for training robust object detection models
 
-### 🎥 **Computer Vision & Media Processing**
+### **Computer Vision & Media Processing**
 
 **[OpenCV (Open Source Computer Vision Library)](https://opencv.org/)**
 - The backbone of all image processing, from frame capture to overlay rendering
@@ -1525,7 +1577,7 @@ This project stands on the shoulders of giants. NOLO would not be possible witho
 - Supports virtually every video format and codec imaginable
 - [FFmpeg GitHub Repository](https://github.com/FFmpeg/FFmpeg)
 
-### ⚡ **GPU Acceleration & Performance**
+### **GPU Acceleration & Performance**
 
 **[NVIDIA CUDA](https://developer.nvidia.com/cuda-zone)**
 - **Game-changing GPU acceleration** that makes real-time AI possible
@@ -1536,7 +1588,7 @@ This project stands on the shoulders of giants. NOLO would not be possible witho
 - Deep learning acceleration primitives
 - Optimized neural network inference that powers our YOLO processing
 
-### 🌐 **Streaming & Network Technologies**
+### **Streaming & Network Technologies**
 
 **[SRS (Simple Realtime Server)](https://github.com/ossrs/srs)**
 - Much better RTMP handling than nginx for live streaming
