@@ -48,4 +48,10 @@ logs/
 
 # Temporary files
 tmp/
-temp/ 
+temp/
+
+# YouTube API credentials (keep on production server only)
+youtube-reset/client_secret.json
+youtube-reset/token.json
+youtube-reset/config.json
+youtube-reset/youtube-reset 
