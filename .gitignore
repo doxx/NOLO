@@ -54,4 +54,9 @@ temp/
 youtube-reset/client_secret.json
 youtube-reset/token.json
 youtube-reset/config.json
-youtube-reset/youtube-reset 
+youtube-reset/youtube-reset
+
+# YouTube Chat Bot credentials and binary
+youtube-chat/client_secret.json
+youtube-chat/token.json
+youtube-chat/gchat
