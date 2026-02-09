@@ -256,7 +256,16 @@ func resetLiveBroadcast(service *youtube.Service, config *Config) {
 		log.Fatal("No stream_id in config. Run -create-stream first or add stream_id to config.json")
 	}
 
-	// First, end any active broadcasts
+	// Check for existing broadcasts we can reuse (don't nuke the URL!)
+	existingID := findReusableBroadcast(service, config.StreamID)
+	if existingID != "" {
+		fmt.Printf("Found existing broadcast: %s - reusing (URL preserved)\n", existingID)
+		fmt.Printf("Watch at: https://youtube.com/watch?v=%s\n", existingID)
+		return
+	}
+
+	// No reusable broadcast found - check for stale ones to clean up
+	fmt.Println("No reusable broadcast found. Cleaning up and creating new one...")
 	endActiveBroadcasts(service)
 
 	// Create new broadcast
@@ -273,12 +282,12 @@ func resetLiveBroadcast(service *youtube.Service, config *Config) {
 			SelfDeclaredMadeForKids: false,
 		},
 		ContentDetails: &youtube.LiveBroadcastContentDetails{
-			EnableAutoStart:  true,  // Auto-transition to live when video flows
-			EnableAutoStop:   true,  // Auto-end when stream stops
-			EnableDvr:        true,  // Allow DVR/rewind
-			RecordFromStart:  true,  // Record the stream
+			EnableAutoStart:      true,  // Auto-transition to live when video flows
+			EnableAutoStop:       false, // DON'T auto-stop - let broadcast persist
+			EnableDvr:            true,  // Allow DVR/rewind
+			RecordFromStart:      true,  // Record the stream
 			EnableClosedCaptions: false,
-			LatencyPreference: "normal", // normal, low, ultraLow
+			LatencyPreference:    "normal", // normal, low, ultraLow
 		},
 	}
 
@@ -303,6 +312,54 @@ func resetLiveBroadcast(service *youtube.Service, config *Config) {
 	fmt.Println("Broadcast bound to stream successfully!")
 	fmt.Println("\nBroadcast is ready. Start streaming and it will auto-go-live.")
 	fmt.Printf("Watch at: https://youtube.com/watch?v=%s\n", response.Id)
+}
+
+// findReusableBroadcast looks for an existing broadcast bound to our stream
+// that can be reused (live, ready, or testing status)
+func findReusableBroadcast(service *youtube.Service, streamID string) string {
+	// Check all my broadcasts
+	call := service.LiveBroadcasts.List([]string{"id", "snippet", "status", "contentDetails"}).Mine(true)
+	response, err := call.Do()
+	if err != nil {
+		log.Printf("Error listing broadcasts: %v", err)
+		return ""
+	}
+
+	for _, broadcast := range response.Items {
+		status := broadcast.Status.LifeCycleStatus
+		fmt.Printf("  Found broadcast: %s (status: %s, id: %s)\n",
+			broadcast.Snippet.Title, status, broadcast.Id)
+
+		// Reusable if it's live, ready, or testing
+		switch status {
+		case "live":
+			fmt.Printf("  -> Broadcast is LIVE - no reset needed!\n")
+			return broadcast.Id
+		case "ready":
+			fmt.Printf("  -> Broadcast is READY - will auto-go-live when stream starts\n")
+			return broadcast.Id
+		case "testing":
+			fmt.Printf("  -> Broadcast is TESTING - will transition to live\n")
+			return broadcast.Id
+		case "created":
+			// Bind to our stream if not already bound
+			fmt.Printf("  -> Broadcast is CREATED - binding to stream and reusing\n")
+			bindCall := service.LiveBroadcasts.Bind(broadcast.Id, []string{"id", "snippet", "contentDetails", "status"})
+			bindCall.StreamId(streamID)
+			_, err = bindCall.Do()
+			if err != nil {
+				log.Printf("  -> Failed to bind: %v", err)
+				continue
+			}
+			return broadcast.Id
+		case "complete":
+			// Completed broadcasts can't be reused - skip
+			fmt.Printf("  -> Broadcast is COMPLETE - cannot reuse\n")
+			continue
+		}
+	}
+
+	return ""
 }
 
 // endActiveBroadcasts ends any currently active broadcasts

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -44,10 +45,9 @@ type RateLimiter struct {
 type CommandHandler struct {
 	rateLimiter *RateLimiter
 	commandChan chan Command
-	apiEndpoint string // Future: NOLO API endpoint
+	noloAPI     string // NOLO HTTP API base URL
 	service     *youtube.Service
 	liveChatID  string
-	camera      *CameraController
 }
 
 // ChatBot manages the YouTube chat connection
@@ -62,35 +62,33 @@ type ChatBot struct {
 
 var (
 	validCommands = map[string]bool{
-		"up":       true,
-		"down":     true,
-		"left":     true,
-		"right":    true,
-		"zoomin":   true,
-		"zoomout":  true,
-		"zoomfull": true,
-		"zoommid":  true,
-		"zoom":     true, // #zoom or #zoom5
-		"pause":    true,
+		// Movement
+		"up": true, "down": true, "left": true, "right": true,
+		// Zoom
+		"zoomin": true, "zoomout": true, "zoomfull": true, "zoommid": true, "zoom": true,
+		// Presets
+		"bridge1": true, "bridge2": true, "bridge3": true, "river": true,
+		// Override control
+		"stay": true, "linger": true, "auto": true, "pause": true,
+		// Overlays
+		"show": true, "hide": true,
+		// Help
 		"commands": true,
-		"auto":     true,
-		"bridge1":  true,
-		"bridge2":  true,
-		"bridge3":  true,
-		"river":    true,
+	}
+
+	// show/hide sub-commands
+	validOverlays = map[string]bool{
+		"target": true, "console": true, "pip": true, "status": true,
 	}
 
 	helpText = `Camera Commands:
 #up #down #left #right - Move camera
-#zoomin #zoomout - Adjust zoom
-#zoomfull #zoommid - Zoom presets
-#zoom1-#zoom10 - Set zoom level
-#bridge1 #bridge2 #bridge3 - Bridge views
-#river - River view
-#auto - Resume AI tracking
-#pause - Pause tracking (30s)
-#commands - Show this list
-Rate limit: 2 commands per 30s per user`
+#zoomin #zoomout #zoomfull #zoommid #zoom1-#zoom10 - Zoom
+#bridge1 #bridge2 #bridge3 #river - Preset views
+#stay #linger - Hold camera position longer
+#auto - Release to AI tracking
+#show.target #show.pip #show.console - Toggle overlays
+#commands - This list | 2 cmds/30s per user`
 )
 
 func NewRateLimiter() *RateLimiter {
@@ -147,12 +145,32 @@ func (rl *RateLimiter) RecordCommand(userID string) {
 	rl.userCommands[userID] = append(rl.userCommands[userID], now)
 }
 
-func NewCommandHandler() *CommandHandler {
+func NewCommandHandler(noloAPI string) *CommandHandler {
 	return &CommandHandler{
 		rateLimiter: NewRateLimiter(),
 		commandChan: make(chan Command, 100),
-		apiEndpoint: "http://localhost:8080/api/ptz", // Future
+		noloAPI:     noloAPI,
 	}
+}
+
+// callNOLO sends a command to the NOLO HTTP API
+func (ch *CommandHandler) callNOLO(path string) error {
+	url := ch.noloAPI + path
+	resp, err := http.Post(url, "", nil)
+	if err != nil {
+		return fmt.Errorf("NOLO API error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("NOLO API %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	log.Printf("[NOLO_API] %s -> %v", path, result)
+	return nil
 }
 
 // SendChatMessage posts a message to the YouTube live chat
@@ -232,99 +250,71 @@ func (ch *CommandHandler) CommandProcessor(ctx context.Context) {
 
 func (ch *CommandHandler) executeCommand(cmd Command) {
 	var err error
+	var apiPath string
 
 	switch cmd.Type {
 	case "commands":
 		log.Printf("[EXECUTE] Sending commands list to %s", cmd.User)
 		ch.SendChatMessage("I'm an AI camera you can control! Move: #up #down #left #right | Zoom: #zoomin #zoomout #zoomfull #zoommid | Presets: #bridge1 #bridge2 #bridge3 #river")
 		time.Sleep(1 * time.Second)
-		ch.SendChatMessage("#zoom1-#zoom10 set zoom level | #auto resume AI tracking | #pause stop 30s | #commands this list | Limit: 2 cmds per 30s")
-		return // Don't send camera command for help
-
-	case "pause":
-		log.Printf("[EXECUTE] Pause requested by %s (AI will resume automatically)", cmd.User)
-		return
-	case "auto":
-		log.Printf("[EXECUTE] Auto requested by %s (AI tracking is always active)", cmd.User)
+		ch.SendChatMessage("#stay #linger hold position | #auto release to AI | #show.target #show.pip overlays | #commands this list | 2 cmds/30s")
 		return
 
+	// Movement
 	case "up":
-		if ch.camera != nil {
-			err = ch.camera.MoveRelative(0, -ch.camera.tiltStep, 0) // Negative tilt = up
-		}
+		apiPath = "/ptz/up"
 	case "down":
-		if ch.camera != nil {
-			err = ch.camera.MoveRelative(0, ch.camera.tiltStep, 0) // Positive tilt = down
-		}
+		apiPath = "/ptz/down"
 	case "left":
-		if ch.camera != nil {
-			err = ch.camera.MoveRelative(-ch.camera.panStep, 0, 0) // Negative pan = left
-		}
+		apiPath = "/ptz/left"
 	case "right":
-		if ch.camera != nil {
-			err = ch.camera.MoveRelative(ch.camera.panStep, 0, 0) // Positive pan = right
-		}
+		apiPath = "/ptz/right"
 
+	// Zoom
 	case "zoomin":
-		if ch.camera != nil {
-			err = ch.camera.MoveRelative(0, 0, 10) // +10 zoom units
-		}
+		apiPath = "/ptz/zoomin"
 	case "zoomout":
-		if ch.camera != nil {
-			err = ch.camera.MoveRelative(0, 0, -10) // -10 zoom units
-		}
+		apiPath = "/ptz/zoomout"
 	case "zoomfull":
-		if ch.camera != nil {
-			pos, gerr := ch.camera.GetPosition()
-			if gerr == nil {
-				err = ch.camera.SendAbsolute(pos.Pan, pos.Tilt, 120)
-			} else {
-				err = gerr
-			}
-		}
+		apiPath = "/ptz/zoomfull"
 	case "zoommid":
-		if ch.camera != nil {
-			pos, gerr := ch.camera.GetPosition()
-			if gerr == nil {
-				err = ch.camera.SendAbsolute(pos.Pan, pos.Tilt, 60)
-			} else {
-				err = gerr
-			}
-		}
+		apiPath = "/ptz/zoommid"
 	case "zoom":
-		if ch.camera != nil {
-			err = ch.camera.SetZoomLevel(cmd.Value)
-		}
+		apiPath = fmt.Sprintf("/ptz/zoom/%d", cmd.Value)
 
-	case "bridge1":
-		if ch.camera != nil {
-			err = ch.camera.GoToPreset("bridge1")
-		}
-	case "bridge2":
-		if ch.camera != nil {
-			err = ch.camera.GoToPreset("bridge2")
-		}
-	case "bridge3":
-		if ch.camera != nil {
-			err = ch.camera.GoToPreset("bridge3")
-		}
+	// Presets
+	case "bridge1", "bridge2", "bridge3":
+		apiPath = "/ptz/preset/" + cmd.Type
 	case "river":
-		if ch.camera != nil {
-			// Go to first river preset
-			err = ch.camera.GoToPreset("river1")
-		}
+		apiPath = "/ptz/preset/river"
 
+	// Override control
+	case "stay", "linger":
+		apiPath = "/ptz/stay"
+	case "auto":
+		apiPath = "/ptz/release"
+	case "pause":
+		apiPath = "/ptz/stay" // Pause = stay
+
+	// Overlay toggles (#show.target, #hide.pip, etc.)
 	default:
-		log.Printf("[EXECUTE] Unknown command: %s", cmd.Type)
-		return
+		if strings.HasPrefix(cmd.Type, "show.") {
+			overlay := strings.TrimPrefix(cmd.Type, "show.")
+			apiPath = "/show/" + overlay
+		} else if strings.HasPrefix(cmd.Type, "hide.") {
+			overlay := strings.TrimPrefix(cmd.Type, "hide.")
+			apiPath = "/hide/" + overlay
+		} else {
+			log.Printf("[EXECUTE] Unknown command: %s", cmd.Type)
+			return
+		}
 	}
 
+	err = ch.callNOLO(apiPath)
 	if err != nil {
 		log.Printf("[EXECUTE_ERROR] %s failed: %v", cmd.Type, err)
-	} else if ch.camera != nil {
-		log.Printf("[EXECUTE] %s from %s - OK", cmd.Type, cmd.User)
 	} else {
-		log.Printf("[EXECUTE] %s from %s (no camera configured)", cmd.Type, cmd.User)
+		log.Printf("[EXECUTE] %s from %s - OK", cmd.Type, cmd.User)
 	}
 }
 
@@ -342,7 +332,20 @@ func NewChatBot(service *youtube.Service, liveChatID string, handler *CommandHan
 
 // ParseCommand extracts a command from a chat message
 func (cb *ChatBot) ParseCommand(message string) (string, int, bool) {
-	matches := cb.commandPattern.FindStringSubmatch(strings.ToLower(message))
+	lower := strings.ToLower(message)
+
+	// Handle #show.target, #show.pip, #hide.console style commands
+	dotPattern := regexp.MustCompile(`#(show|hide)\.(\w+)`)
+	if dotMatches := dotPattern.FindStringSubmatch(lower); dotMatches != nil {
+		action := dotMatches[1]  // show or hide
+		overlay := dotMatches[2] // target, console, pip, status
+		if validOverlays[overlay] {
+			return action + "." + overlay, 0, true
+		}
+		return "", 0, false
+	}
+
+	matches := cb.commandPattern.FindStringSubmatch(lower)
 	if matches == nil {
 		return "", 0, false
 	}
@@ -496,6 +499,126 @@ func GetLiveChatID(service *youtube.Service) (string, error) {
 	return "", fmt.Errorf("no active/live broadcasts found (checked %d broadcasts)", len(response.Items))
 }
 
+// ScrapeChatBot reads chat via YouTube's internal endpoint (zero API quota)
+type ScrapeChatBot struct {
+	reader         *ChatReader
+	handler        *CommandHandler
+	commandPattern *regexp.Regexp
+}
+
+func NewScrapeChatBot(videoID string, handler *CommandHandler) (*ScrapeChatBot, error) {
+	reader, err := NewChatReader(videoID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ScrapeChatBot{
+		reader:         reader,
+		handler:        handler,
+		commandPattern: regexp.MustCompile(`#([a-zA-Z]+)(\d*)`),
+	}, nil
+}
+
+// PollMessages continuously reads chat via the internal endpoint
+func (sb *ScrapeChatBot) PollMessages(ctx context.Context) {
+	log.Println("[SCRAPE] Starting chat poll (zero API quota)")
+
+	// First fetch grabs history - skip it
+	firstFetch := true
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[SCRAPE] Stopped")
+			return
+		default:
+		}
+
+		messages, err := sb.reader.Fetch()
+		if err != nil {
+			log.Printf("[SCRAPE_ERROR] %v", err)
+			time.Sleep(10 * time.Second)
+			continue
+		}
+
+		if firstFetch {
+			log.Printf("[SCRAPE] Skipped %d history messages", len(messages))
+			firstFetch = false
+			continue
+		}
+
+		for _, msg := range messages {
+			age := time.Since(msg.Timestamp)
+
+			if age > 60*time.Second {
+				continue
+			}
+
+			cmdType, value, found := sb.parseCommand(msg.Message)
+			if !found {
+				continue
+			}
+
+			log.Printf("[SCRAPE_CMD] %s: %s (age: %.0fs)", msg.Author, msg.Message, age.Seconds())
+
+			cmd := Command{
+				Type:      cmdType,
+				Value:     value,
+				User:      msg.Author,
+				UserID:    msg.AuthorID,
+				Timestamp: msg.Timestamp,
+			}
+
+			// Fall back to author name if no channel ID
+			if cmd.UserID == "" {
+				cmd.UserID = msg.Author
+			}
+
+			sb.handler.ProcessCommand(cmd)
+		}
+	}
+}
+
+func (sb *ScrapeChatBot) parseCommand(message string) (string, int, bool) {
+	lower := strings.ToLower(message)
+
+	// Handle #show.target, #hide.pip style
+	dotPattern := regexp.MustCompile(`#(show|hide)\.(\w+)`)
+	if dotMatches := dotPattern.FindStringSubmatch(lower); dotMatches != nil {
+		action := dotMatches[1]
+		overlay := dotMatches[2]
+		if validOverlays[overlay] {
+			return action + "." + overlay, 0, true
+		}
+		return "", 0, false
+	}
+
+	matches := sb.commandPattern.FindStringSubmatch(lower)
+	if matches == nil {
+		return "", 0, false
+	}
+
+	cmdBase := matches[1]
+	numSuffix := matches[2]
+	value := 0
+
+	if numSuffix != "" {
+		fmt.Sscanf(numSuffix, "%d", &value)
+	}
+
+	if cmdBase == "zoom" && value >= 1 && value <= 10 {
+		return "zoom", value, true
+	}
+	if cmdBase == "bridge" && value >= 1 && value <= 3 {
+		return fmt.Sprintf("bridge%d", value), 0, true
+	}
+	if validCommands[cmdBase] {
+		return cmdBase, 0, true
+	}
+
+	return "", 0, false
+}
+
 // OAuth helper functions (same as youtube-reset)
 func getClient(ctx context.Context, config *oauth2.Config, tokenFile string) *http.Client {
 	token, err := tokenFromFile(tokenFile)
@@ -564,15 +687,10 @@ func saveToken(path string, token *oauth2.Token) {
 func main() {
 	credentialsFile := flag.String("credentials", "client_secret.json", "Path to OAuth credentials file")
 	tokenFile := flag.String("token", "token.json", "Path to token file")
-	videoID := flag.String("video", "", "Video ID to monitor chat for (e.g. zQGzrbwXabo)")
+	videoID := flag.String("video", "", "Video ID to monitor chat for (e.g. 7wHgYc_kN98)")
 	chatID := flag.String("chat-id", "", "Direct live chat ID (skip video lookup, saves API quota)")
-	cameraIP := flag.String("camera-ip", "192.168.0.59", "Camera IP address")
-	cameraPort := flag.String("camera-port", "80", "Camera HTTP port")
-	cameraUser := flag.String("camera-user", "admin", "Camera username")
-	cameraPass := flag.String("camera-pass", "password1", "Camera password")
-	presetsFile := flag.String("presets", "", "Path to scanning.json for preset positions")
-	testMode := flag.Bool("test", false, "Test mode - simulate commands without YouTube")
-	quickTest := flag.Bool("quicktest", false, "Quick test - fast simulation with 1s cooldowns")
+	scrapeMode := flag.Bool("scrape", false, "Use internal YouTube endpoint for reading chat (zero API quota for reads)")
+	noloAPIAddr := flag.String("nolo-api", "http://127.0.0.1:8080", "NOLO HTTP API address")
 	flag.Parse()
 
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -583,45 +701,50 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	handler := NewCommandHandler()
-
-	// Initialize camera controller
-	if *cameraIP != "" {
-		camera := NewCameraController(*cameraIP, *cameraPort, *cameraUser, *cameraPass)
-
-		// Load presets
-		presetPath := *presetsFile
-		if presetPath == "" {
-			// Try default location
-			presetPath = "../scanning.json"
-		}
-		if err := camera.LoadPresets(presetPath); err != nil {
-			log.Printf("[PTZ] Warning: Could not load presets: %v", err)
-		}
-
-		// Test camera connection
-		pos, err := camera.GetPosition()
-		if err != nil {
-			log.Printf("[PTZ] Warning: Could not connect to camera: %v", err)
-			log.Printf("[PTZ] Camera control disabled - commands will be logged only")
-		} else {
-			log.Printf("[PTZ] Camera connected! Current position: Pan=%.0f Tilt=%.0f Zoom=%.0f", pos.Pan, pos.Tilt, pos.Zoom)
-			handler.camera = camera
-		}
-	}
+	handler := NewCommandHandler(*noloAPIAddr)
+	log.Printf("[API] NOLO API endpoint: %s", *noloAPIAddr)
 
 	// Start command processor
 	go handler.CommandProcessor(ctx)
 
-	if *testMode || *quickTest {
-		if *quickTest {
-			log.Println("[TEST] Running quick test mode (1s cooldowns)")
-			handler.rateLimiter.globalCooldown = 1 * time.Second
-			handler.rateLimiter.userCooldown = 3 * time.Second
-		} else {
-			log.Println("[TEST] Running test mode (production cooldowns: 10s global, 30s user)")
+	// Scrape mode: read chat via internal endpoint (no API quota for reads)
+	if *scrapeMode {
+		if *videoID == "" {
+			log.Fatal("--scrape requires --video VIDEO_ID")
 		}
-		testCommands(handler, *quickTest)
+
+		scrapeBot, err := NewScrapeChatBot(*videoID, handler)
+		if err != nil {
+			log.Fatalf("Failed to start scrape chat bot: %v", err)
+		}
+
+		// Optionally set up official API for replies only (if credentials exist)
+		if _, err := os.Stat(*credentialsFile); err == nil {
+			credentials, err := os.ReadFile(*credentialsFile)
+			if err == nil {
+				config, err := google.ConfigFromJSON(credentials, youtube.YoutubeScope, youtube.YoutubeForceSslScope)
+				if err == nil {
+					client := getClient(ctx, config, *tokenFile)
+					service, err := youtube.NewService(ctx, option.WithHTTPClient(client))
+					if err == nil {
+						// Get chat ID for sending replies
+						liveChatID, err := GetLiveChatIDByVideo(service, *videoID)
+						if err == nil {
+							handler.service = service
+							handler.liveChatID = liveChatID
+							log.Printf("[API] Official API enabled for replies (chat ID: %s)", liveChatID[:20]+"...")
+						} else {
+							log.Printf("[API] Warning: Could not get chat ID for replies: %v", err)
+							log.Printf("[API] Chat replies disabled, read-only mode")
+						}
+					}
+				}
+			}
+		} else {
+			log.Printf("[SCRAPE] No credentials file found - running read-only (no chat replies)")
+		}
+
+		scrapeBot.PollMessages(ctx)
 		return
 	}
 
@@ -668,99 +791,4 @@ func main() {
 	// Create and start chat bot
 	bot := NewChatBot(service, liveChatID, handler)
 	bot.PollMessages(ctx)
-}
-
-// testCommands simulates chat commands for testing
-func testCommands(handler *CommandHandler, quick bool) {
-	log.Println("[TEST] Simulating chat commands...")
-
-	// Wait times: production uses 10s, quick uses 1s
-	waitTime := 10
-	shortWait := 2
-	if quick {
-		waitTime = 1
-		shortWait = 0
-	}
-
-	testCases := []struct {
-		user     string
-		userID   string
-		message  string
-		waitSecs int // Seconds to wait BEFORE this command
-		note     string
-	}{
-		{"Alice", "UC_ALICE_001", "#up", 0, "First command - should work"},
-		{"Bob", "UC_BOB_00002", "#down", shortWait, "Global cooldown not elapsed - blocked"},
-		{"Charlie", "UC_CHARLIE", "#left", waitTime, "After global cooldown - works"},
-		{"Alice", "UC_ALICE_001", "#right", waitTime, "Alice's 2nd cmd, after cooldown - works"},
-		{"Alice", "UC_ALICE_001", "#zoomin", waitTime, "Alice's 3rd cmd, user limit hit - blocked"},
-		{"Bob", "UC_BOB_00002", "#zoom5", waitTime, "Bob can still command - works"},
-		{"Charlie", "UC_CHARLIE", "#zoomfull", waitTime, "Charlie's 2nd - works"},
-		{"Charlie", "UC_CHARLIE", "#zoommid", waitTime, "Charlie's 3rd - blocked"},
-		{"Dave", "UC_DAVE_004", "#help", waitTime, "Dave's first - works"},
-		{"Dave", "UC_DAVE_004", "#bridge1", waitTime, "Dave's 2nd - works"},
-		{"Dave", "UC_DAVE_004", "#bridge2", waitTime, "Dave's 3rd - blocked"},
-		{"Eve", "UC_EVE_00005", "#invalidcmd", 0, "Invalid command - ignored"},
-		{"Eve", "UC_EVE_00005", "#auto", waitTime, "Valid command - works"},
-		{"Eve", "UC_EVE_00005", "#pause", waitTime, "Eve's 2nd - works"},
-	}
-
-	// Use same pattern as ChatBot
-	pattern := regexp.MustCompile(`#([a-zA-Z]+)(\d*)`)
-
-	for i, tc := range testCases {
-		// Wait before processing
-		if tc.waitSecs > 0 {
-			log.Printf("[TEST %d] Waiting %ds... (%s)", i+1, tc.waitSecs, tc.note)
-			time.Sleep(time.Duration(tc.waitSecs) * time.Second)
-		}
-
-		matches := pattern.FindStringSubmatch(strings.ToLower(tc.message))
-		if matches == nil {
-			log.Printf("[TEST %d] No command found in: %s", i+1, tc.message)
-			continue
-		}
-
-		cmdBase := matches[1]
-		numSuffix := matches[2]
-		value := 0
-
-		if numSuffix != "" {
-			fmt.Sscanf(numSuffix, "%d", &value)
-		}
-
-		var cmdType string
-		var valid bool
-
-		// Apply same logic as ParseCommand
-		if cmdBase == "zoom" && value >= 1 && value <= 10 {
-			cmdType = "zoom"
-			valid = true
-		} else if cmdBase == "bridge" && value >= 1 && value <= 3 {
-			cmdType = fmt.Sprintf("bridge%d", value)
-			value = 0
-			valid = true
-		} else if validCommands[cmdBase] {
-			cmdType = cmdBase
-			valid = true
-		}
-
-		if !valid {
-			log.Printf("[TEST %d] Invalid: %s (%s)", i+1, tc.message, tc.note)
-			continue
-		}
-
-		cmd := Command{
-			Type:      cmdType,
-			Value:     value,
-			User:      tc.user,
-			UserID:    tc.userID,
-			Timestamp: time.Now(),
-		}
-
-		log.Printf("[TEST %d] %s: %s from %s", i+1, tc.note, tc.message, tc.user)
-		handler.ProcessCommand(cmd)
-	}
-
-	log.Println("[TEST] Test complete")
 }
