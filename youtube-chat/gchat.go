@@ -48,6 +48,7 @@ type CommandHandler struct {
 	noloAPI     string // NOLO HTTP API base URL
 	service     *youtube.Service
 	liveChatID  string
+	riverData   *RiverData
 }
 
 // ChatBot manages the YouTube chat connection
@@ -72,6 +73,8 @@ var (
 		"stay": true, "linger": true, "auto": true, "pause": true,
 		// Overlays
 		"show": true, "hide": true,
+		// Info
+		"boats": true, "weather": true, "tide": true,
 		// Help
 		"commands": true,
 	}
@@ -257,7 +260,23 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 		log.Printf("[EXECUTE] Sending commands list to %s", cmd.User)
 		ch.SendChatMessage("I'm an AI camera you can control! Move: #up #down #left #right | Zoom: #zoomin #zoomout #zoomfull #zoommid | Presets: #bridge1 #bridge2 #bridge3 #river")
 		time.Sleep(1 * time.Second)
-		ch.SendChatMessage("#stay #linger hold position | #auto release to AI | #show.target #show.pip overlays | #commands this list | 2 cmds/30s")
+		ch.SendChatMessage("#boats #weather #tide for info | #stay hold position | #auto release to AI | #show.target #show.pip overlays | 2 cmds/30s")
+		return
+
+	case "weather":
+		if ch.riverData != nil {
+			ch.SendChatMessage(ch.riverData.GetWeather())
+		}
+		return
+	case "tide":
+		if ch.riverData != nil {
+			ch.SendChatMessage(ch.riverData.GetTide())
+		}
+		return
+	case "boats":
+		if ch.riverData != nil {
+			ch.SendChatMessage(ch.riverData.GetBoats())
+		}
 		return
 
 	// Movement
@@ -704,6 +723,10 @@ func main() {
 	handler := NewCommandHandler(*noloAPIAddr)
 	log.Printf("[API] NOLO API endpoint: %s", *noloAPIAddr)
 
+	// Start river data feeds (weather, tides, AIS vessels)
+	// sendChat function will be set once we have YouTube API access
+	handler.riverData = NewRiverData(nil)
+
 	// Start command processor
 	go handler.CommandProcessor(ctx)
 
@@ -743,6 +766,10 @@ func main() {
 		} else {
 			log.Printf("[SCRAPE] No credentials file found - running read-only (no chat replies)")
 		}
+
+		// Start river data feeds with chat send function
+		handler.riverData.sendChatFn = func(msg string) { handler.SendChatMessage(msg) }
+		handler.riverData.Start()
 
 		scrapeBot.PollMessages(ctx)
 		return
@@ -787,6 +814,10 @@ func main() {
 	// Give handler access to chat for replies
 	handler.service = service
 	handler.liveChatID = liveChatID
+
+	// Start river data feeds with chat send function
+	handler.riverData.sendChatFn = func(msg string) { handler.SendChatMessage(msg) }
+	handler.riverData.Start()
 
 	// Create and start chat bot
 	bot := NewChatBot(service, liveChatID, handler)

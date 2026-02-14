@@ -22,7 +22,7 @@ const (
 
 // Regex patterns for parsing YouTube's HTML
 var (
-	apiKeyRegex       = regexp.MustCompile(`"INNERTUBE_API_KEY":"([^"]+)"`)
+	apiKeyRegex        = regexp.MustCompile(`"INNERTUBE_API_KEY":"([^"]+)"`)
 	clientVersionRegex = regexp.MustCompile(`"INNERTUBE_CLIENT_VERSION":"([^"]+)"`)
 	continuationRegex  = regexp.MustCompile(`"continuation":"(0of[^"]+)"`)
 )
@@ -47,7 +47,7 @@ type ChatMsg struct {
 // innertubeRequest is the JSON body for the innertube API
 type innertubeRequest struct {
 	Context      innertubeContext `json:"context"`
-	Continuation string          `json:"continuation"`
+	Continuation string           `json:"continuation"`
 }
 
 type innertubeContext struct {
