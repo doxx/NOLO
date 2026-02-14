@@ -60,3 +60,8 @@ youtube-reset/youtube-reset
 youtube-chat/client_secret.json
 youtube-chat/token.json
 youtube-chat/gchat
+youtube-chat/river_data_check.go
+
+# Recorder binary and recordings
+recorder/recorder
+recordings/

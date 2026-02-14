@@ -710,6 +710,7 @@ func main() {
 	chatID := flag.String("chat-id", "", "Direct live chat ID (skip video lookup, saves API quota)")
 	scrapeMode := flag.Bool("scrape", false, "Use internal YouTube endpoint for reading chat (zero API quota for reads)")
 	noloAPIAddr := flag.String("nolo-api", "http://127.0.0.1:8080", "NOLO HTTP API address")
+	aisKey := flag.String("ais-key", "", "AISStream.io API key for vessel tracking")
 	flag.Parse()
 
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -725,7 +726,7 @@ func main() {
 
 	// Start river data feeds (weather, tides, AIS vessels)
 	// sendChat function will be set once we have YouTube API access
-	handler.riverData = NewRiverData(nil)
+	handler.riverData = NewRiverData(nil, *aisKey)
 
 	// Start command processor
 	go handler.CommandProcessor(ctx)

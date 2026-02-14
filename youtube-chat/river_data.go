@@ -23,14 +23,13 @@ const (
 
 	// AISStream
 	aisStreamWSS = "wss://stream.aisstream.io/v0/stream"
-	aisAPIKey    = "10a248968712b8fc927a753e23c33b614c76f336"
 
 	// Camera location: 200 Biscayne Blvd Way, Miami, FL 33131
 	cameraLat = 25.7695
 	cameraLon = -80.1890
 
 	// Detection radius in nautical miles
-	detectionRadius = 0.4 // 0.4nm = ~741 meters = ~2,431 feet
+	detectionRadius = 0.3 // 0.3nm = ~556 meters = ~1,823 feet
 )
 
 // RiverData manages all environmental data feeds
@@ -52,7 +51,8 @@ type RiverData struct {
 	sendChatFn func(string)      // Function to send chat messages
 
 	// AIS connection
-	aisConn *websocket.Conn
+	aisConn   *websocket.Conn
+	aisAPIKey string
 }
 
 // Vessel represents a tracked vessel
@@ -120,11 +120,12 @@ func describePosition(vesselLat, vesselLon, cog float64) string {
 	return location
 }
 
-func NewRiverData(sendChat func(string)) *RiverData {
+func NewRiverData(sendChat func(string), aisKey string) *RiverData {
 	return &RiverData{
 		vessels:    make(map[int]*Vessel),
 		announced:  make(map[int]time.Time),
 		sendChatFn: sendChat,
+		aisAPIKey:  aisKey,
 	}
 }
 
@@ -132,9 +133,14 @@ func NewRiverData(sendChat func(string)) *RiverData {
 func (rd *RiverData) Start() {
 	go rd.weatherLoop()
 	go rd.tideLoop()
-	go rd.aisLoop()
+	if rd.aisAPIKey != "" {
+		go rd.aisLoop()
+		go rd.vesselCleanup()
+		log.Println("[AIS] Vessel tracking enabled")
+	} else {
+		log.Println("[AIS] No API key - vessel tracking disabled")
+	}
 	go rd.hourlyAnnounce()
-	go rd.vesselCleanup()
 	log.Println("[RIVER_DATA] All data feeds started")
 }
 
@@ -360,7 +366,7 @@ func (rd *RiverData) connectAIS() {
 
 	// Subscribe to our area
 	sub := map[string]interface{}{
-		"APIKey":             aisAPIKey,
+		"APIKey":             rd.aisAPIKey,
 		"BoundingBoxes":      [][][2]float64{{{latMin, lonMin}, {latMax, lonMax}}},
 		"FilterMessageTypes": []string{"PositionReport", "StandardClassBPositionReport"},
 	}
@@ -412,7 +418,7 @@ func (rd *RiverData) connectAIS() {
 
 		name := strings.TrimSpace(ais.MetaData.ShipName)
 		if name == "" {
-			name = fmt.Sprintf("Vessel-%d", ais.MetaData.MMSI)
+			continue // Skip vessels without names
 		}
 
 		// Parse speed and course from position report
@@ -475,21 +481,23 @@ func (rd *RiverData) connectAIS() {
 	}
 }
 
-// hourlyAnnounce posts weather + tide + vessel summary every hour
+// hourlyAnnounce posts weather + tide summary every 4 hours
 func (rd *RiverData) hourlyAnnounce() {
-	// Wait for initial data to load
-	time.Sleep(30 * time.Second)
-
-	// Announce on start
-	rd.doHourlyAnnounce()
-
-	// Then every hour on the hour
+	// Wait for next 4-hour mark (don't announce on startup)
 	now := time.Now()
-	nextHour := now.Truncate(time.Hour).Add(time.Hour)
-	time.Sleep(time.Until(nextHour))
+	// Next 4-hour boundary: 0, 4, 8, 12, 16, 20
+	currentHour := now.Hour()
+	nextSlot := ((currentHour / 4) + 1) * 4
+	nextAnnounce := time.Date(now.Year(), now.Month(), now.Day(), nextSlot%24, 0, 0, 0, now.Location())
+	if nextSlot >= 24 {
+		nextAnnounce = nextAnnounce.AddDate(0, 0, 1)
+	}
+	log.Printf("[ANNOUNCE] Next weather/tide announcement at %s", nextAnnounce.Format("3:04 PM"))
+	time.Sleep(time.Until(nextAnnounce))
 
-	ticker := time.NewTicker(1 * time.Hour)
 	rd.doHourlyAnnounce()
+
+	ticker := time.NewTicker(4 * time.Hour)
 	for range ticker.C {
 		rd.doHourlyAnnounce()
 	}
