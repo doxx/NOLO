@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,13 @@ const (
 	detectionRadius = 0.3 // 0.3nm = ~556 meters = ~1,823 feet
 )
 
+// SegmentEvent is a timestamped event for video description enrichment
+type SegmentEvent struct {
+	Time    time.Time `json:"time"`
+	Type    string    `json:"type"`    // vessel, weather, tide, bridge, chat_topic
+	Message string    `json:"message"` // No usernames - content only
+}
+
 // RiverData manages all environmental data feeds
 type RiverData struct {
 	mu sync.RWMutex
@@ -53,6 +61,10 @@ type RiverData struct {
 	// AIS connection
 	aisConn   *websocket.Conn
 	aisAPIKey string
+
+	// Segment event log for video descriptions
+	segmentEvents []SegmentEvent
+	segmentMu     sync.Mutex
 }
 
 // Vessel represents a tracked vessel
@@ -141,7 +153,27 @@ func (rd *RiverData) Start() {
 		log.Println("[AIS] No API key - vessel tracking disabled")
 	}
 	go rd.hourlyAnnounce()
+	go rd.segmentEventSaver()
 	log.Println("[RIVER_DATA] All data feeds started")
+}
+
+// segmentEventSaver periodically saves segment events to disk for the recorder
+func (rd *RiverData) segmentEventSaver() {
+	ticker := time.NewTicker(5 * time.Minute)
+	for range ticker.C {
+		rd.segmentMu.Lock()
+		count := len(rd.segmentEvents)
+		rd.segmentMu.Unlock()
+		if count > 0 {
+			path := fmt.Sprintf("/home/blyon/NOLO/recordings/events_%s.json",
+				time.Now().Format("20060102_1504"))
+			if err := rd.SaveSegmentEvents(path); err != nil {
+				log.Printf("[EVENTS_ERROR] Failed to save: %v", err)
+			} else {
+				log.Printf("[EVENTS] Saved %d events to %s", count, path)
+			}
+		}
+	}
 }
 
 // GetWeather returns cached weather string
@@ -261,6 +293,7 @@ func (rd *RiverData) fetchWeather() {
 	rd.mu.Unlock()
 
 	log.Printf("[WEATHER] %s", msg)
+	rd.LogSegmentEvent("weather", msg)
 }
 
 // tideLoop fetches tide data every 30 minutes
@@ -340,6 +373,7 @@ func (rd *RiverData) fetchTides() {
 	rd.mu.Unlock()
 
 	log.Printf("[TIDE] %s", msg)
+	rd.LogSegmentEvent("tide", msg)
 }
 
 // aisLoop maintains AIS websocket connection
@@ -416,7 +450,7 @@ func (rd *RiverData) connectAIS() {
 			continue // Outside our zone
 		}
 
-		name := strings.TrimSpace(ais.MetaData.ShipName)
+		name := formatVesselName(ais.MetaData.ShipName)
 		if name == "" {
 			continue // Skip vessels without names
 		}
@@ -471,6 +505,8 @@ func (rd *RiverData) connectAIS() {
 			if rd.sendChatFn != nil {
 				go rd.sendChatFn(chatMsg)
 			}
+			// Log for video description
+			rd.LogSegmentEvent("vessel", fmt.Sprintf("%s %s", name, position))
 		}
 		rd.vesselMu.Unlock()
 
@@ -546,6 +582,55 @@ func haversineNM(lat1, lon1, lat2, lon2 float64) float64 {
 			math.Sin(dLon/2)*math.Sin(dLon/2)
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 	return earthRadiusNM * c
+}
+
+// LogSegmentEvent records an event for video description enrichment
+func (rd *RiverData) LogSegmentEvent(eventType, message string) {
+	rd.segmentMu.Lock()
+	defer rd.segmentMu.Unlock()
+	rd.segmentEvents = append(rd.segmentEvents, SegmentEvent{
+		Time:    time.Now(),
+		Type:    eventType,
+		Message: message,
+	})
+}
+
+// FlushSegmentEvents returns all events and clears the log (called when a recording segment completes)
+func (rd *RiverData) FlushSegmentEvents() []SegmentEvent {
+	rd.segmentMu.Lock()
+	defer rd.segmentMu.Unlock()
+	events := rd.segmentEvents
+	rd.segmentEvents = nil
+	return events
+}
+
+// SaveSegmentEvents writes events to a JSON file for the recorder to pick up
+func (rd *RiverData) SaveSegmentEvents(path string) error {
+	events := rd.FlushSegmentEvents()
+	if len(events) == 0 {
+		return nil
+	}
+	data, err := json.MarshalIndent(events, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// formatVesselName converts AIS vessel names from "BEYOND BEYOND" to "Beyond Beyond"
+func formatVesselName(raw string) string {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return ""
+	}
+	// AIS names are typically ALL CAPS - convert to title case
+	words := strings.Fields(strings.ToLower(name))
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // boundingBoxNM returns a bounding box for a given radius in nautical miles
