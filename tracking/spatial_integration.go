@@ -937,7 +937,14 @@ func (si *SpatialIntegration) calculateP2TrackingData(boat *TrackedBoat) {
 }
 
 // shouldUseP2Targeting determines if a boat should use P2-centric targeting with enhanced fallback logic
+// NOTE: Disabled for YOLOv8n - the improved model detects people too reliably, causing the camera
+// to constantly jitter between boat center and people centroid. P2 data is still used for
+// boat prioritization (boats with people are more interesting), but camera always tracks boat center.
 func (si *SpatialIntegration) shouldUseP2Targeting(boat *TrackedBoat) bool {
+	// DISABLED: Always track boat center, never switch to people centroid
+	// v8n detects people everywhere (riverbank, bridges) which causes false P2 lock
+	return false
+
 	// Only use P2 targeting for LOCK or SUPER LOCK boats
 	if !boat.IsLocked {
 		if boat.UseP2Target {

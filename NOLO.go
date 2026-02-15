@@ -3981,10 +3981,18 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 									height := int(origH)
 
 									// Clamp to frame
-									if left < 0 { left = 0 }
-									if top < 0 { top = 0 }
-									if left+width > int(originalWidth) { width = int(originalWidth) - left }
-									if top+height > int(originalHeight) { height = int(originalHeight) - top }
+									if left < 0 {
+										left = 0
+									}
+									if top < 0 {
+										top = 0
+									}
+									if left+width > int(originalWidth) {
+										width = int(originalWidth) - left
+									}
+									if top+height > int(originalHeight) {
+										height = int(originalHeight) - top
+									}
 
 									// Size filtering
 									if width*height < 2000 {
