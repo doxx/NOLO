@@ -1717,195 +1717,70 @@ func (si *SpatialIntegration) updateBoatSpatialPosition(boat *TrackedBoat) {
 		currentSpatial.Pan, currentSpatial.Tilt, currentSpatial.Zoom, targetPan, targetTilt, targetZoom), boat.ID)
 }
 
-// calculateOptimalZoom determines the best zoom level for tracking a boat using PROGRESSIVE ZOOM
+// calculateOptimalZoom determines the best zoom level for tracking a boat
 func (si *SpatialIntegration) calculateOptimalZoom(boat *TrackedBoat, currentZoom float64) float64 {
 	// Zoom constraints
 	const minZoom = 10.0  // Minimum zoom level
 	const maxZoom = 120.0 // Maximum zoom level
 
-	// === PROGRESSIVE ZOOM SYSTEM (v8n-tuned: faster zoom-in) ===
-	// v8n gives high-confidence detections from frame 1, so we zoom faster
+	// === IMMEDIATE ZOOM SYSTEM (v8n) ===
+	// v8n gives high-confidence detections from frame 1.
+	// Calculate the FINAL target zoom immediately and send it.
+	// The camera hardware does smooth zoom transitions — we don't need to baby-step.
+	// Old progressive system took 7+ seconds to reach useful zoom. Now it's instant.
 	var targetZoom float64
 
-	// Stage 1: FIRST DETECTION (1 frame only) — start at scan zoom, just acquired
+	// First frame only — hold at scan zoom while camera pans to the boat
 	if boat.DetectionCount <= 1 {
-		targetZoom = 18.0 // Match scan zoom level
-		si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🚀 ACQUIRED: Boat %s (det:%d) → Zoom %.1f",
-			boat.ID, boat.DetectionCount, targetZoom), boat.ID)
+		targetZoom = 18.0
+		si.debugMsg("ZOOM_CALC", fmt.Sprintf("🚀 ACQUIRED: Boat %s → hold Z%.0f while panning",
+			boat.ID, targetZoom), boat.ID)
 		return math.Max(minZoom, math.Min(maxZoom, targetZoom))
 	}
 
-	// Stage 2: CONFIRMING (2-3 detections) — zoom in quickly, v8n is confident
-	if boat.DetectionCount <= 3 {
-		baseZoom := 25.0
-		confidenceBonus := (boat.Confidence - 0.3) * 30.0 // v8n at 0.7 = +12 bonus
-		targetZoom = baseZoom + confidenceBonus
+	// From frame 2+: calculate final zoom target and send it immediately
+	// Base zoom from confidence (v8n gives 0.45-0.92 for real boats)
+	confidenceFactor := math.Min((boat.Confidence-0.3)/0.4, 1.0) // 0-1 scale
+	targetZoom = 40.0 + (confidenceFactor * 25.0) // 40-65 base from confidence alone
 
-		si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("📈 CONFIRMING: Boat %s (det:%d, conf:%.2f) → %.1f",
-			boat.ID, boat.DetectionCount, boat.Confidence, targetZoom), boat.ID)
-		return math.Max(minZoom, math.Min(maxZoom, targetZoom))
+	// Velocity adjustment — fast boats need slightly less zoom to stay in frame
+	velocity := math.Sqrt(boat.PixelVelocity.X*boat.PixelVelocity.X + boat.PixelVelocity.Y*boat.PixelVelocity.Y)
+	if velocity > 80.0 {
+		targetZoom *= 0.8 // Fast boat — pull back a bit
+	} else if velocity < 10.0 {
+		targetZoom *= 1.1 // Stationary/slow — push in
 	}
 
-	// Stage 3: LOCKED TRACKING (4+ detections) — full zoom logic with people bonus
-	if boat.DetectionCount <= 23 {
-		baseZoom := 35.0 // v8n: start higher, we're confident it's real
-
-		if boat.IsLocked {
-			// Locked boat - calculate stability-based zoom
-			stabilityFactor := math.Min(float64(boat.DetectionCount)/15.0, 1.0) // 0-1 based on detection count
-			confidenceFactor := math.Min((boat.Confidence-0.3)/0.2, 1.0)        // 0-1 based on confidence (50% for full bonus)
-
-			// Calculate distance from center for centering bonus
-			centerX := float64(si.frameCenterX)
-			centerY := float64(si.frameCenterY)
-			deltaX := math.Abs(float64(boat.CurrentPixel.X) - centerX)
-			deltaY := math.Abs(float64(boat.CurrentPixel.Y) - centerY)
-			distanceFromCenter := math.Sqrt(deltaX*deltaX + deltaY*deltaY)
-			maxDistance := math.Sqrt(centerX*centerX + centerY*centerY)
-			centeringFactor := 1.0 - (distanceFromCenter / maxDistance) // 1.0 = centered, 0.0 = edge
-
-			// Calculate velocity factor (stationary boats get more zoom)
-			velocity := math.Sqrt(boat.PixelVelocity.X*boat.PixelVelocity.X + boat.PixelVelocity.Y*boat.PixelVelocity.Y)
-			velocityFactor := 1.0
-			if velocity > 20.0 {
-				velocityFactor = 0.7 // Reduce zoom for fast moving boats
-			} else if velocity < 5.0 {
-				velocityFactor = 1.3 // Increase zoom for stationary boats
-			}
-
-			// Progressive zoom formula (v8n-tuned): More aggressive zoom for confirmed boats
-			stabilityZoom := 25.0 + (stabilityFactor * 30.0) // 25-55 based on detection count
-			confidenceBonus := confidenceFactor * 20.0       // +0-20 based on confidence
-			centeringBonus := centeringFactor * 10.0         // +0-10 based on centering
-
-			targetZoom = stabilityZoom + confidenceBonus + centeringBonus
-			targetZoom *= velocityFactor
-
-			// PEOPLE-BASED ZOOM: More people = deeper zoom (better content)
-			// v8n detects people reliably, so this is now the primary zoom driver
-			if boat.HasP2Objects && boat.P2Count > 0 {
-				var peopleZoomBonus float64
-				switch {
-				case boat.P2Count >= 3:
-					peopleZoomBonus = 40.0 // Party boat! Full zoom
-				case boat.P2Count == 2:
-					peopleZoomBonus = 30.0 // Multiple people, go deep
-				default:
-					peopleZoomBonus = 20.0 // Single person, moderate zoom
-				}
-				targetZoom += peopleZoomBonus
-				si.debugMsg("ZOOM_PEOPLE", fmt.Sprintf("👤 Boat %s has %d people → +%.0f zoom bonus (target: %.0f)",
-					boat.ID, boat.P2Count, peopleZoomBonus, targetZoom), boat.ID)
-			} else {
-				// No people detected — moderate caution (might be false positive at distance)
-				if targetZoom > 60.0 {
-					targetZoom = 60.0 // Cap zoom for unvalidated boats (still useful zoom)
-					si.debugMsg("ZOOM_CAUTIOUS", fmt.Sprintf("⚠️ Boat %s has no people — capping zoom at 60 until validated",
-						boat.ID), boat.ID)
-				}
-			}
-
-			si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🔒 LOCKED STAGE: Boat %s (det:%d, conf:%.2f, centered:%.1f%%, vel:%.1f)",
-				boat.ID, boat.DetectionCount, boat.Confidence, centeringFactor*100, velocity), boat.ID)
-			si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🔒 Stability:%.1f + Confidence:%.1f + Centering:%.1f × Velocity:%.1f = %.1f",
-				stabilityZoom, confidenceBonus, centeringBonus, velocityFactor, targetZoom), boat.ID)
-		} else {
-			// Unlocked boat - conservative zoom
-			targetZoom = baseZoom + (boat.Confidence * 10.0) // 25-35 range
-			si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🔓 UNLOCKED STAGE: Boat %s (det:%d, conf:%.2f) → Base %.1f + Conf %.1f = %.1f",
-				boat.ID, boat.DetectionCount, boat.Confidence, baseZoom, boat.Confidence*10.0, targetZoom), boat.ID)
+	// PEOPLE-BASED ZOOM: The primary zoom driver with v8n
+	if boat.HasP2Objects && boat.P2Count > 0 {
+		switch {
+		case boat.P2Count >= 3:
+			targetZoom = math.Max(targetZoom, 100.0) // Party boat! Deep zoom
+		case boat.P2Count == 2:
+			targetZoom = math.Max(targetZoom, 85.0) // Multiple people
+		default:
+			targetZoom = math.Max(targetZoom, 70.0) // Single person
 		}
+		si.debugMsg("ZOOM_PEOPLE", fmt.Sprintf("👤 Boat %s: %d people → target Z%.0f",
+			boat.ID, boat.P2Count, targetZoom), boat.ID)
 	} else {
-		// Stage 4: SUPER LOCK MEGA ZOOM (24+ detections) - Maximum optical zoom for sustained tracking
-		baseZoom := 50.0
-
-		if boat.IsLocked {
-			// SUPER LOCK - MEGA ZOOM calculations (much more aggressive for 24+ frames)
-			stabilityFactor := math.Min(float64(boat.DetectionCount)/20.0, 1.0) // 0-1 based on detection count (peak at 20)
-			confidenceFactor := math.Min((boat.Confidence-0.3)/0.2, 1.0)        // 0-1 based on confidence
-
-			// Calculate distance from center for centering bonus
-			centerX := float64(si.frameCenterX)
-			centerY := float64(si.frameCenterY)
-			deltaX := math.Abs(float64(boat.CurrentPixel.X) - centerX)
-			deltaY := math.Abs(float64(boat.CurrentPixel.Y) - centerY)
-			distanceFromCenter := math.Sqrt(deltaX*deltaX + deltaY*deltaY)
-			maxDistance := math.Sqrt(centerX*centerX + centerY*centerY)
-			centeringFactor := 1.0 - (distanceFromCenter / maxDistance) // 1.0 = centered, 0.0 = edge
-
-			// Calculate velocity factor (stationary boats get more zoom)
-			velocity := math.Sqrt(boat.PixelVelocity.X*boat.PixelVelocity.X + boat.PixelVelocity.Y*boat.PixelVelocity.Y)
-			velocityFactor := 1.0
-			if velocity > 15.0 {
-				velocityFactor = 0.8 // Slightly reduce zoom for fast moving boats
-			} else if velocity < 3.0 {
-				velocityFactor = 1.2 // Increase for stationary boats (reduced from 1.4 to prevent over-zoom)
-			}
-
-			// AGGRESSIVE MEGA ZOOM formula: Start at 70, build up to 120 based on stability
-			megaZoom := 70.0 + (stabilityFactor * 40.0) // 70-110 based on detection count (more aggressive base)
-			confidenceBonus := confidenceFactor * 15.0  // +0-15 based on confidence
-			centeringBonus := centeringFactor * 10.0    // +0-10 based on centering
-
-			targetZoom = megaZoom + confidenceBonus + centeringBonus
-			targetZoom *= velocityFactor
-
-			// ENHANCED PEOPLE-CENTRIC ZOOM: Optimize for people framing when using P2 targeting
-			if boat.UseP2Target {
-				// Calculate optimal zoom based on people spread for precise framing
-				peopleOptimalZoom := si.calculateP2OptimalZoom(boat, targetZoom)
-				targetZoom = peopleOptimalZoom
-
-				si.debugMsg("PEOPLE_ZOOM", fmt.Sprintf("🎯👤 Using P2-centric zoom optimization: spread=%.1fpx → zoom=%.1f",
-					boat.P2Spread, targetZoom), boat.ID)
-			} else if boat.HasP2Objects {
-				// Standard person bonus when not using P2-centric targeting
-				megaPersonBonus := 15.0 + (float64(boat.P2Count) * 5.0) // +15-25 for people (reduced to prevent over-zoom)
-				targetZoom += megaPersonBonus
-				si.debugMsg("MEGA_ZOOM_PERSON", fmt.Sprintf("👤🔍 SUPER LOCK boat %s has %d people - adding +%.1f MEGA zoom bonus",
-					boat.ID, boat.P2Count, megaPersonBonus), boat.ID)
-			}
-
-			si.debugMsg("MEGA_ZOOM", fmt.Sprintf("🚀💎 SUPER LOCK STAGE: Boat %s (det:%d, conf:%.2f, centered:%.1f%%, vel:%.1f)",
-				boat.ID, boat.DetectionCount, boat.Confidence, centeringFactor*100, velocity), boat.ID)
-			si.debugMsg("MEGA_ZOOM", fmt.Sprintf("🚀💎 MegaBase:%.1f + Confidence:%.1f + Centering:%.1f × Velocity:%.1f = %.1f",
-				megaZoom, confidenceBonus, centeringBonus, velocityFactor, targetZoom), boat.ID)
-		} else {
-			// Even unlocked 24+ detection boats get enhanced zoom
-			targetZoom = baseZoom + (boat.Confidence * 15.0) // 50-65 range
-			si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🔓💎 SUPER LOCK UNLOCKED: Boat %s (det:%d, conf:%.2f) → Base %.1f + Conf %.1f = %.1f",
-				boat.ID, boat.DetectionCount, boat.Confidence, baseZoom, boat.Confidence*15.0, targetZoom), boat.ID)
+		// No people — cap at 60 (still useful, prevents false positive deep zoom)
+		if targetZoom > 60.0 {
+			targetZoom = 60.0
 		}
 	}
 
-	// Apply zoom change limits to prevent huge jumps - REDUCED for better lag handling
-	var maxZoomChange float64
-	if boat.DetectionCount <= 3 {
-		maxZoomChange = 5.0 // Very conservative changes for new boats
-	} else if boat.DetectionCount <= 6 {
-		maxZoomChange = 5.0 // Reduced from 15.0 - more conservative for building boats
-	} else if boat.DetectionCount >= 24 && boat.IsLocked { // SUPER LOCK: 24+ frames for MEGA ZOOM changes
-		maxZoomChange = 25.0 // MEGA ZOOM changes for SUPER LOCK boats (unchanged)
-	} else if boat.IsLocked {
-		maxZoomChange = 15.0 // Reduced from 25.0 - less aggressive for locked boats
-	} else {
-		maxZoomChange = 15.0 // Standard changes for unlocked boats
-	}
+	si.debugMsg("ZOOM_CALC", fmt.Sprintf("🔍 Boat %s: conf=%.2f vel=%.0f people=%d → Z%.0f",
+		boat.ID, boat.Confidence, velocity, boat.P2Count, targetZoom), boat.ID)
 
-	// Apply zoom change limit
-	zoomChange := targetZoom - currentZoom
-	if math.Abs(zoomChange) > maxZoomChange {
-		if zoomChange > 0 {
-			targetZoom = currentZoom + maxZoomChange
-		} else {
-			targetZoom = currentZoom - maxZoomChange
-		}
-		si.debugMsg("ZOOM_LIMIT", fmt.Sprintf("Limited zoom change from %.1f to %.1f (max change: %.1f)",
-			zoomChange, targetZoom-currentZoom, maxZoomChange), boat.ID)
-	}
-
-	// Apply hard constraints
+	// Clamp and return
 	targetZoom = math.Max(minZoom, math.Min(maxZoom, targetZoom))
+
+	// Return the calculated zoom — no more progressive stages needed
+	// The target is already the final zoom level including people bonus
+	return targetZoom
+
+	// No legacy code — zoom is calculated above and returned immediately
 
 	// Final debug output
 	si.debugMsg("ZOOM_FINAL", fmt.Sprintf("Boat %s: Current=%.1f → Target=%.1f (change: %.1f, stage: %s)",
