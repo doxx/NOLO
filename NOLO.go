@@ -2667,10 +2667,10 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 			"override_active":    csm.IsManualOverrideActive(),
 			"override_remaining": csm.ManualOverrideRemaining(),
 			"overlays": map[string]bool{
-				"target":   *overlays.targetOverlay,
-				"console":  *overlays.terminalOverlay,
-				"status":   *overlays.statusOverlay,
-				"pip":      *overlays.pipZoom,
+				"target":  *overlays.targetOverlay,
+				"console": *overlays.terminalOverlay,
+				"status":  *overlays.statusOverlay,
+				"pip":     *overlays.pipZoom,
 			},
 		})
 	})
@@ -3898,117 +3898,128 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 
 					// Parse detections based on model type
 					if globalYOLOModelType == "v8n" {
-						// === YOLOv8 OUTPUT PARSING ===
-						// Output shape: [1, 84, 8400] - need to reshape to [84, 8400]
-						// Row = field (0-3: x,y,w,h  4-83: class scores), Col = detection candidate
+						// === YOLOv8 OUTPUT PARSING (OPTIMIZED - ZERO CGO IN INNER LOOP) ===
+						// Output shape: [1, 84, 8400] as contiguous float32 array
+						// Layout in memory (row-major after reshape to [84, 8400]):
+						//   Row 0: cx values for all 8400 candidates
+						//   Row 1: cy values for all 8400 candidates
+						//   Row 2: w values for all 8400 candidates
+						//   Row 3: h values for all 8400 candidates
+						//   Row 4-83: class 0-79 scores for all 8400 candidates
+						// Access: data[row * numDetections + col]
 						outputSize := output.Size()
 						if len(outputSize) < 3 {
 							debugMsg("YOLO_ERROR", fmt.Sprintf("Unexpected v8 output shape: %v", outputSize))
 						} else {
-							numFields := outputSize[1]     // 84
 							numDetections := outputSize[2] // 8400
-							data2D := output.Reshape(1, numFields)
-							defer data2D.Close()
+							numClasses := 80
 
-							// Collect candidates for NMS
-							var nmsBoxes []image.Rectangle
-							var nmsConfidences []float32
-							var nmsClassIDs []int
-							var nmsClassNames []string
+							// CRITICAL OPTIMIZATION: Read entire tensor into Go slice with ONE CGO call
+							// This replaces ~705,600 individual GetFloatAt() CGO calls per frame
+							rawData, err := output.DataPtrFloat32()
+							if err != nil || rawData == nil {
+								debugMsg("YOLO_ERROR", fmt.Sprintf("Failed to get v8 output data pointer: %v", err))
+							} else {
+								// Pre-compute confidence threshold as float32 for fast comparison
+								confThreshF32 := float32(globalP1MinConfidence)
+								p2ConfThreshF32 := float32(globalP2MinConfidence)
+								isTracking := spatialIntegration.GetCurrentMode() == tracking.ModeTracking
 
-							for i := 0; i < numDetections; i++ {
-								// Find best class score (no objectness in v8)
-								var maxScore float32
-								var maxClassID int
-								for c := 0; c < 80; c++ {
-									score := data2D.GetFloatAt(c+4, i)
-									if score > maxScore {
-										maxScore = score
-										maxClassID = c
+								// Collect candidates for NMS
+								var nmsBoxes []image.Rectangle
+								var nmsConfidences []float32
+								var nmsClassNames []string
+
+								for i := 0; i < numDetections; i++ {
+									// Find best class score — pure Go, no CGO
+									var maxScore float32
+									var maxClassID int
+									for c := 0; c < numClasses; c++ {
+										score := rawData[(4+c)*numDetections+i]
+										if score > maxScore {
+											maxScore = score
+											maxClassID = c
+										}
 									}
-								}
 
-								className := ""
-								if maxClassID < len(classNames) {
-									className = classNames[maxClassID]
-								}
+									// Early exit: skip if below minimum possible threshold
+									if maxScore < confThreshF32 && maxScore < p2ConfThreshF32 {
+										continue
+									}
 
-								// v8 coordinates are in input pixel space (0-640)
-								cx := float64(data2D.GetFloatAt(0, i))
-								cy := float64(data2D.GetFloatAt(1, i))
-								w := float64(data2D.GetFloatAt(2, i))
-								h := float64(data2D.GetFloatAt(3, i))
+									className := ""
+									if maxClassID < len(classNames) {
+										className = classNames[maxClassID]
+									}
 
-								// Transform from letterboxed input space to original frame coordinates
-								origX := cx * float64(scaleX)
-								origY := (cy - float64(yOffsetF)) * float64(scaleY)
-								origW := w * float64(scaleX)
-								origH := h * float64(scaleY)
+									// Class filtering with appropriate threshold
+									validClass := false
+									if isP1Object(className) {
+										validClass = maxScore >= confThreshF32
+									} else if isP2Object(className) && isTracking {
+										validClass = maxScore >= p2ConfThreshF32
+									}
+									if !validClass {
+										continue
+									}
 
-								left := int(origX - origW/2)
-								top := int(origY - origH/2)
-								width := int(origW)
-								height := int(origH)
+									// Read bbox coordinates — pure Go array access
+									cx := float64(rawData[0*numDetections+i])
+									cy := float64(rawData[1*numDetections+i])
+									w := float64(rawData[2*numDetections+i])
+									h := float64(rawData[3*numDetections+i])
 
-								// Clamp to frame
-								if left < 0 { left = 0 }
-								if top < 0 { top = 0 }
-								if left+width > int(originalWidth) { width = int(originalWidth) - left }
-								if top+height > int(originalHeight) { height = int(originalHeight) - top }
+									// Transform from letterboxed input space to original frame coordinates
+									origX := cx * float64(scaleX)
+									origY := (cy - float64(yOffsetF)) * float64(scaleY)
+									origW := w * float64(scaleX)
+									origH := h * float64(scaleY)
 
-								rect := image.Rect(left, top, left+width, top+height)
+									left := int(origX - origW/2)
+									top := int(origY - origH/2)
+									width := int(origW)
+									height := int(origH)
 
-								// Store raw detection for overlay
-								if maxScore > 0.1 {
+									// Clamp to frame
+									if left < 0 { left = 0 }
+									if top < 0 { top = 0 }
+									if left+width > int(originalWidth) { width = int(originalWidth) - left }
+									if top+height > int(originalHeight) { height = int(originalHeight) - top }
+
+									// Size filtering
+									if width*height < 2000 {
+										continue
+									}
+									if isP1Object(className) && (width <= 50 || height <= 50) {
+										continue
+									}
+
+									rect := image.Rect(left, top, left+width, top+height)
+
+									// Store raw detection for overlay
 									allRawDetections = append(allRawDetections, rect)
 									allRawClassNames = append(allRawClassNames, className)
 									allRawConfidences = append(allRawConfidences, float64(maxScore))
+
+									nmsBoxes = append(nmsBoxes, rect)
+									nmsConfidences = append(nmsConfidences, maxScore)
+									nmsClassNames = append(nmsClassNames, className)
 								}
 
-								// Class and confidence filtering
-								validClass := false
-								var minConfidenceThreshold float64
-								if isP1Object(className) {
-									validClass = true
-									minConfidenceThreshold = globalP1MinConfidence
-								} else if isP2Object(className) {
-									if spatialIntegration.GetCurrentMode() == tracking.ModeTracking {
-										validClass = true
-										minConfidenceThreshold = globalP2MinConfidence
-									}
-								}
-								if !validClass || float64(maxScore) < minConfidenceThreshold {
-									continue
-								}
+								// Apply NMS to remove overlapping detections
+								if len(nmsBoxes) > 0 {
+									nmsIndices := gocv.NMSBoxes(nmsBoxes, nmsConfidences, confThreshF32, 0.45)
+									for _, idx := range nmsIndices {
+										detectionRects = append(detectionRects, nmsBoxes[idx])
+										detectionClassNames = append(detectionClassNames, nmsClassNames[idx])
+										detectionConfidences = append(detectionConfidences, float64(nmsConfidences[idx]))
 
-								// Size filtering
-								if width*height < 2000 {
-									continue
-								}
-								if isP1Object(className) && (width <= 50 || height <= 50) {
-									debugMsg("YOLO_FILTER", fmt.Sprintf("Rejecting small %s: %dx%d", className, width, height))
-									continue
-								}
+										debugMsgVerbose("YOLO_ACCEPT", fmt.Sprintf("%s: conf=%.2f, area=%d",
+											nmsClassNames[idx], nmsConfidences[idx], nmsBoxes[idx].Dx()*nmsBoxes[idx].Dy()))
 
-								nmsBoxes = append(nmsBoxes, rect)
-								nmsConfidences = append(nmsConfidences, maxScore)
-								nmsClassIDs = append(nmsClassIDs, maxClassID)
-								nmsClassNames = append(nmsClassNames, className)
-							}
-
-							// Apply NMS to remove overlapping detections
-							if len(nmsBoxes) > 0 {
-								nmsIndices := gocv.NMSBoxes(nmsBoxes, nmsConfidences, float32(globalP1MinConfidence), 0.45)
-								for _, idx := range nmsIndices {
-									detectionRects = append(detectionRects, nmsBoxes[idx])
-									detectionClassNames = append(detectionClassNames, nmsClassNames[idx])
-									detectionConfidences = append(detectionConfidences, float64(nmsConfidences[idx]))
-
-									debugMsgVerbose("YOLO_ACCEPT", fmt.Sprintf("%s: conf=%.2f, area=%d",
-										nmsClassNames[idx], nmsConfidences[idx], nmsBoxes[idx].Dx()*nmsBoxes[idx].Dy()))
-
-									if *yoloOverlay {
-										renderer.DrawDetection(frameToWrite, nmsBoxes[idx], nmsClassNames[idx], float64(nmsConfidences[idx]))
+										if *yoloOverlay {
+											renderer.DrawDetection(frameToWrite, nmsBoxes[idx], nmsClassNames[idx], float64(nmsConfidences[idx]))
+										}
 									}
 								}
 							}
@@ -4074,24 +4085,33 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 								}
 							}
 							if !validClass || confidence < float32(minConfidenceThreshold) {
-								scores.Close(); trackMatClose("yolo")
-								data.Close(); trackMatClose("yolo")
-								row.Close(); trackMatClose("yolo")
+								scores.Close()
+								trackMatClose("yolo")
+								data.Close()
+								trackMatClose("yolo")
+								row.Close()
+								trackMatClose("yolo")
 								continue
 							}
 
 							// Size filtering
 							if width*height < 2000 {
-								scores.Close(); trackMatClose("yolo")
-								data.Close(); trackMatClose("yolo")
-								row.Close(); trackMatClose("yolo")
+								scores.Close()
+								trackMatClose("yolo")
+								data.Close()
+								trackMatClose("yolo")
+								row.Close()
+								trackMatClose("yolo")
 								continue
 							}
 							if isP1Object(className) && (width <= 50 || height <= 50) {
 								debugMsg("YOLO_FILTER", fmt.Sprintf("Rejecting small %s: %dx%d", className, width, height))
-								scores.Close(); trackMatClose("yolo")
-								data.Close(); trackMatClose("yolo")
-								row.Close(); trackMatClose("yolo")
+								scores.Close()
+								trackMatClose("yolo")
+								data.Close()
+								trackMatClose("yolo")
+								row.Close()
+								trackMatClose("yolo")
 								continue
 							}
 
@@ -4106,9 +4126,12 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 								renderer.DrawDetection(frameToWrite, rect, className, float64(confidence))
 							}
 
-							scores.Close(); trackMatClose("yolo")
-							data.Close(); trackMatClose("yolo")
-							row.Close(); trackMatClose("yolo")
+							scores.Close()
+							trackMatClose("yolo")
+							data.Close()
+							trackMatClose("yolo")
+							row.Close()
+							trackMatClose("yolo")
 						}
 					}
 
