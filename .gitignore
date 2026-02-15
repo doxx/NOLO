@@ -68,3 +68,6 @@ recordings/
 
 # PyTorch weights (large, use ONNX exports instead)
 *.pt
+
+# AI context files (private project notes, not for public repo)
+CONTEXT.md
