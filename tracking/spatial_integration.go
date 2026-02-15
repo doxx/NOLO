@@ -1561,10 +1561,10 @@ func (si *SpatialIntegration) calculateBoatVelocity(boat *TrackedBoat) {
 	rawVelX := movementX / frameTimeDiff
 	rawVelY := movementY / frameTimeDiff
 
-	// VELOCITY CAP: Clamp to 150 px/s to filter camera-movement artifacts
-	// Real boats rarely exceed 100 px/s in pixel space. Spikes of 2000+ px/s
-	// are always camera panning contaminating the velocity calculation.
-	const maxVelocity = 150.0
+	// VELOCITY CAP: Clamp to 250 px/s to filter camera-movement artifacts
+	// At high zoom (Z52+), real fast boats can reach 270 px/s in pixel space.
+	// Old 150 cap was choking fast boats. 250 still filters 2000+ camera artifacts.
+	const maxVelocity = 250.0
 	speed := math.Sqrt(rawVelX*rawVelX + rawVelY*rawVelY)
 	if speed > maxVelocity {
 		scale := maxVelocity / speed
