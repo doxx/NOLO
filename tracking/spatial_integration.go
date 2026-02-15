@@ -51,6 +51,9 @@ type SpatialIntegration struct {
 	lastLockedPosition  SpatialCoordinate // Where the locked boat was last seen
 	holdoverPositionSet bool              // Whether we've set the holdover position
 
+	// Scanning hysteresis - prevent flip-flop between tracking and scanning
+	lastBoatSeenTime time.Time // When we last had any boats in allBoats
+
 	// Command deduplication to prevent API spam
 	lastSentPan  float64 // Last pan command sent
 	lastSentTilt float64 // Last tilt command sent
@@ -264,7 +267,7 @@ func NewSpatialIntegration(ptzCtrl ptz.Controller, frameWidth, frameHeight int, 
 		frameCount:           0,
 
 		// Post-lock holdover settings (REMOVED: will be replaced by RECOVERY mode)
-		postLockHoldover: 10 * time.Second, // Linger for 10 seconds after losing locked boat
+		postLockHoldover: 15 * time.Second, // Linger for 15 seconds after losing locked boat (was 10s)
 
 		// RECOVERY mode settings
 		recoveryTimeout: 30 * time.Second, // Maximum 30 seconds in recovery mode
@@ -449,10 +452,20 @@ func (si *SpatialIntegration) UpdateTracking(detections []image.Rectangle, class
 			// No holdover period - handle loss and ensure river scanning is active
 			si.handleTargetLoss()
 
-			// Make sure we're in river scanning mode when no target is selected
-			if !si.spatialTracker.IsScanning() && len(si.allBoats) == 0 {
-				si.debugMsg("RIVER_SCAN", "No boats detected - activating river scanning")
-				si.spatialTracker.SetScanningMode(true)
+			// Scanning hysteresis: only switch to scanning after 3 seconds of no boats
+			// Prevents rapid flip-flop when YOLO briefly loses a boat for 1-2 frames
+			if len(si.allBoats) == 0 {
+				if si.lastBoatSeenTime.IsZero() {
+					si.lastBoatSeenTime = time.Now()
+				}
+				if time.Since(si.lastBoatSeenTime) > 3*time.Second {
+					if !si.spatialTracker.IsScanning() {
+						si.debugMsg("RIVER_SCAN", fmt.Sprintf("No boats for %.1fs - activating river scanning", time.Since(si.lastBoatSeenTime).Seconds()))
+						si.spatialTracker.SetScanningMode(true)
+					}
+				}
+			} else {
+				si.lastBoatSeenTime = time.Time{} // Reset when boats are present
 			}
 
 			// Execute river scanning pattern
@@ -3628,42 +3641,96 @@ func (si *SpatialIntegration) smartPTZTracking() {
 		return
 	}
 
-	// CRITICAL FIX: Skip ALL predictive movements and just track to actual boat position
-	si.debugMsg("PTZ_TRACK", "🔧 PREDICTIVE TRACKING DISABLED - using simple boat position tracking")
-
-	// === SIMPLE CENTER-BASED TRACKING (July 6th working approach) ===
-	// Just check if boat is off-center and move camera to boat's actual position
-
 	// Skip tracking if boat is lost (let predictive mode handle it)
 	if si.targetBoat.LostFrames > 0 {
-		si.debugMsg("PTZ_TRACK", fmt.Sprintf("⏸️ Boat lost for %d frames - staying in position for predictive mode",
+		si.debugMsg("PTZ_TRACK", fmt.Sprintf("Boat lost for %d frames - holding position",
 			si.targetBoat.LostFrames), si.targetBoat.ID)
 		return
 	}
 
-	// ENHANCED: Use P2-centric tracking for LOCK/SUPER LOCK boats with quality people detection
+	// === VELOCITY-LEAD TRACKING ===
+	// Instead of pointing at where the boat IS, point AHEAD of it
+	// to compensate for PTZ latency + pipeline delay (~2-3 seconds)
+
+	// Get base tracking target (P2 centroid or boat center)
 	var trackingTargetX, trackingTargetY int
 	var trackingMode string
 
 	if si.targetBoat.UseP2Target {
-		// Use P2 centroid for precise targeting
 		trackingTargetX = si.targetBoat.P2Centroid.X
 		trackingTargetY = si.targetBoat.P2Centroid.Y
 		trackingMode = "PEOPLE_CENTROID"
-
-		si.debugMsg("PEOPLE_TRACK", fmt.Sprintf("🎯👤 Using P2 centroid (%d,%d) for tracking - %d people, quality %.2f",
-			trackingTargetX, trackingTargetY, si.targetBoat.P2Count, si.targetBoat.P2Quality), si.targetBoat.ID)
 	} else {
-		// Fall back to boat center for standard tracking
 		trackingTargetX = si.targetBoat.CurrentPixel.X
 		trackingTargetY = si.targetBoat.CurrentPixel.Y
 		trackingMode = "BOAT_CENTER"
-
-		if si.targetBoat.HasP2Objects {
-			si.debugMsg("PEOPLE_TRACK", fmt.Sprintf("🚤 Using boat center (%d,%d) - people quality %.2f below threshold",
-				trackingTargetX, trackingTargetY, si.targetBoat.P2Quality), si.targetBoat.ID)
-		}
 	}
+
+	// Store original position for debug logging
+	origTargetX := trackingTargetX
+	origTargetY := trackingTargetY
+
+	// Apply velocity-based lead to compensate for camera/pipeline latency
+	velX := si.targetBoat.PixelVelocity.X
+	velY := si.targetBoat.PixelVelocity.Y
+	speed := math.Sqrt(velX*velX + velY*velY) // pixels/second
+
+	leadApplied := false
+	if speed > 5.0 { // Only lead if boat is actually moving (>5 px/s)
+		// Lead time: how far ahead to aim (seconds)
+		// Uses ptzPredictionTime config (default 2.5s)
+		leadTime := si.ptzPredictionTime
+		if leadTime <= 0 {
+			leadTime = 2.5 // Fallback default
+		}
+
+		// Project tracking target forward by lead time
+		leadX := int(velX * leadTime)
+		leadY := int(velY * leadTime)
+		trackingTargetX += leadX
+		trackingTargetY += leadY
+
+		// Composition bias: offset 10% of frame in direction of travel
+		// This keeps open water ahead of the boat (like a good cameraman)
+		compositionBiasX := 0.0
+		compositionBiasY := 0.0
+		if math.Abs(velX) > math.Abs(velY) {
+			// Primarily horizontal movement
+			if velX > 0 {
+				compositionBiasX = float64(si.frameWidth) * 0.08
+			} else {
+				compositionBiasX = float64(si.frameWidth) * -0.08
+			}
+		} else if math.Abs(velY) > 5.0 {
+			// Primarily vertical movement
+			if velY > 0 {
+				compositionBiasY = float64(si.frameHeight) * 0.08
+			} else {
+				compositionBiasY = float64(si.frameHeight) * -0.08
+			}
+		}
+		trackingTargetX += int(compositionBiasX)
+		trackingTargetY += int(compositionBiasY)
+
+		// Clamp to frame bounds
+		trackingTargetX = int(math.Max(0, math.Min(float64(si.frameWidth), float64(trackingTargetX))))
+		trackingTargetY = int(math.Max(0, math.Min(float64(si.frameHeight), float64(trackingTargetY))))
+
+		leadApplied = true
+		// Always log lead tracking (bypasses debug flag)
+		fmt.Printf("[%s][LEAD_TRACK] Vel:(%.0f,%.0f) speed=%.0f | Lead:%.1fs (+%d,+%d px) | Bias:(+%.0f,+%.0f) | (%d,%d)->(%d,%d) [%s]\n",
+			time.Now().Format("15:04:05.000"),
+			velX, velY, speed, leadTime, leadX, leadY, compositionBiasX, compositionBiasY,
+			origTargetX, origTargetY, trackingTargetX, trackingTargetY, si.targetBoat.ID)
+		si.debugMsg("LEAD_TRACK", fmt.Sprintf("Velocity: (%.0f,%.0f) px/s, speed=%.0f | Lead: %.1fs ahead (+%d,+%d px) | Target: (%d,%d)->(%d,%d)",
+			velX, velY, speed, leadTime, leadX, leadY,
+			origTargetX, origTargetY, trackingTargetX, trackingTargetY), si.targetBoat.ID)
+	} else {
+		si.debugMsg("LEAD_TRACK", fmt.Sprintf("Speed %.1f px/s (below threshold) - no lead applied, tracking at (%d,%d)",
+			speed, trackingTargetX, trackingTargetY), si.targetBoat.ID)
+	}
+
+	_ = leadApplied // Avoid unused variable warning
 
 	// Calculate how far tracking target is from center in pixels
 	offsetX := trackingTargetX - si.frameCenterX
@@ -3676,8 +3743,12 @@ func (si *SpatialIntegration) smartPTZTracking() {
 
 	// Trigger movement if target is more than 1% off-center
 	if maxDistanceFromCenter > si.centerTriggerThreshold {
-		si.debugMsg("SIMPLE_TRACK", fmt.Sprintf("🎯 %s %.1f%% off-center (>%.1f%% threshold) - moving to target position",
-			trackingMode, maxDistanceFromCenter*100, si.centerTriggerThreshold*100), si.targetBoat.ID)
+		leadInfo := ""
+		if speed > 5.0 {
+			leadInfo = fmt.Sprintf(" [LEAD: %.0fpx/s, %.1fs ahead]", speed, si.ptzPredictionTime)
+		}
+		si.debugMsg("SIMPLE_TRACK", fmt.Sprintf("%s %.1f%% off-center (>%.1f%%) - moving%s",
+			trackingMode, maxDistanceFromCenter*100, si.centerTriggerThreshold*100, leadInfo), si.targetBoat.ID)
 
 		// Calculate spatial coordinates for the tracking target
 		var target SpatialCoordinate
@@ -4138,8 +4209,8 @@ func (si *SpatialIntegration) executePredictiveMove2() {
 func (si *SpatialIntegration) executeZoomOut() {
 	// If this is the first call for this phase, send the zoom command
 	if !si.recoveryData.WaitingForArrival {
-		// 50% zoom out (120 → 60, etc.)
-		newZoom := si.recoveryData.OriginalZoom * 0.5
+		// 20% zoom out (120 → 96, etc.) - less disruptive than original 50%
+		newZoom := si.recoveryData.OriginalZoom * 0.80
 
 		// Get current position
 		currentPos := si.ptzCtrl.GetCurrentPosition()
@@ -4154,7 +4225,7 @@ func (si *SpatialIntegration) executeZoomOut() {
 		si.recoveryData.PhaseStartTime = time.Now()
 		si.recoveryData.WaitingForArrival = true
 
-		si.executePTZMovement(zoomOutTarget, "RECOVERY: Zoom out 50%")
+		si.executePTZMovement(zoomOutTarget, "RECOVERY: Zoom out 20%")
 
 		si.debugMsg("RECOVERY_PHASE2", fmt.Sprintf("📹 Zooming out 50%: %.0f → %.0f",
 			si.recoveryData.OriginalZoom, newZoom), si.recoveryData.ObjectID)

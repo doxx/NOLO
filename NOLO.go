@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"image"
@@ -10,6 +11,7 @@ import (
 	"io/ioutil"
 	"math"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -50,6 +52,11 @@ var (
 	targetDisplayTracked = flag.Bool("target-display-tracked", false, "Only show military target information on the tracked P1 target, not all detected P1 objects")
 	p1MinConfidence      = flag.Float64("p1-min-confidence", 0.25, "Minimum confidence threshold for P1 targets (boats) (0.0-1.0, default: 0.25)\n\t\tExample: -p1-min-confidence=0.30 for less sensitive boat detection")
 	p2MinConfidence      = flag.Float64("p2-min-confidence", 0.15, "Minimum confidence threshold for P2 targets (people) (0.0-1.0, default: 0.15)\n\t\tExample: -p2-min-confidence=0.20 for less sensitive person detection")
+
+	// API control
+	apiPort          = flag.String("api-port", "8080", "HTTP API port for external control (chat bot, etc.)")
+	overrideDuration = flag.Int("override-duration", 15, "Seconds to hold manual override per command (default: 15)")
+	overrideStay     = flag.Int("override-stay", 30, "Seconds to hold manual override for #stay/#linger (default: 30)")
 
 	// JPEG frame saving configuration
 	jpgPath        = flag.String("jpg-path", "", "Directory path for saving JPEG frames (required when using JPEG flags)")
@@ -2363,6 +2370,294 @@ func isP2Object(className string) bool {
 	return false
 }
 
+// OverlayState tracks which overlays were toggled by API (for auto-restore)
+type OverlayState struct {
+	mu              sync.Mutex
+	statusOverlay   *bool
+	targetOverlay   *bool
+	terminalOverlay *bool
+	pipZoom         *bool
+	debugMode       *bool
+	// Original values before API toggled them
+	origStatus   bool
+	origTarget   bool
+	origTerminal bool
+	origPip      bool
+	origDebug    bool
+	// Track if API changed each one
+	apiChangedStatus   bool
+	apiChangedTarget   bool
+	apiChangedTerminal bool
+	apiChangedPip      bool
+	apiChangedDebug    bool
+}
+
+func (os *OverlayState) Toggle(name string, enabled bool) bool {
+	os.mu.Lock()
+	defer os.mu.Unlock()
+
+	switch name {
+	case "target":
+		if !os.apiChangedTarget {
+			os.origTarget = *os.targetOverlay
+			os.apiChangedTarget = true
+		}
+		*os.targetOverlay = enabled
+	case "console", "terminal":
+		if !os.apiChangedTerminal {
+			os.origTerminal = *os.terminalOverlay
+			os.apiChangedTerminal = true
+		}
+		*os.terminalOverlay = enabled
+	case "status":
+		if !os.apiChangedStatus {
+			os.origStatus = *os.statusOverlay
+			os.apiChangedStatus = true
+		}
+		*os.statusOverlay = enabled
+	case "pip":
+		if !os.apiChangedPip {
+			os.origPip = *os.pipZoom
+			os.apiChangedPip = true
+		}
+		*os.pipZoom = enabled
+	default:
+		return false
+	}
+	return true
+}
+
+func (os *OverlayState) RestoreAll() {
+	os.mu.Lock()
+	defer os.mu.Unlock()
+
+	if os.apiChangedStatus {
+		*os.statusOverlay = os.origStatus
+		os.apiChangedStatus = false
+	}
+	if os.apiChangedTarget {
+		*os.targetOverlay = os.origTarget
+		os.apiChangedTarget = false
+	}
+	if os.apiChangedTerminal {
+		*os.terminalOverlay = os.origTerminal
+		os.apiChangedTerminal = false
+	}
+	if os.apiChangedPip {
+		*os.pipZoom = os.origPip
+		os.apiChangedPip = false
+	}
+	debugMsg("API", "Overlays restored to original state")
+}
+
+// startAPIServer starts the HTTP API for external control (chat bot, etc.)
+func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration, overlays *OverlayState) {
+	mux := http.NewServeMux()
+
+	defaultOverride := time.Duration(*overrideDuration) * time.Second
+	stayOverride := time.Duration(*overrideStay) * time.Second
+
+	// Watchdog: restore overlays when override expires
+	go func() {
+		wasActive := false
+		for {
+			time.Sleep(1 * time.Second)
+			isActive := csm.IsManualOverrideActive()
+			if wasActive && !isActive {
+				overlays.RestoreAll()
+				debugMsg("API", "Manual override expired - AI tracking resumed")
+			}
+			wasActive = isActive
+		}
+	}()
+
+	// Helper: send a PTZ command with manual override
+	sendPTZ := func(w http.ResponseWriter, pan, tilt, zoom *float64, reason string, overrideDur time.Duration) {
+		csm.SetManualOverride(time.Now().Add(overrideDur))
+
+		cmd := ptz.PTZCommand{
+			Command:      "absolutePosition",
+			Reason:       reason,
+			Duration:     2 * time.Second,
+			AbsolutePan:  pan,
+			AbsoluteTilt: tilt,
+			AbsoluteZoom: zoom,
+		}
+		success := csm.SendManualCommand(cmd)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":                 success,
+			"command":            reason,
+			"override_remaining": csm.ManualOverrideRemaining(),
+		})
+	}
+
+	// Helper: get current position and apply relative move
+	relativeMove := func(w http.ResponseWriter, r *http.Request, panDelta, tiltDelta, zoomDelta float64, reason string) {
+		pos := si.GetPTZController().GetCurrentPosition()
+		newPan := pos.Pan + panDelta
+		newTilt := pos.Tilt + tiltDelta
+		newZoom := pos.Zoom + zoomDelta
+		sendPTZ(w, &newPan, &newTilt, &newZoom,
+			fmt.Sprintf("API: %s", reason), defaultOverride)
+	}
+
+	// Movement commands
+	mux.HandleFunc("/ptz/up", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 0, -30, 0, "up")
+	})
+	mux.HandleFunc("/ptz/down", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 0, 30, 0, "down")
+	})
+	mux.HandleFunc("/ptz/left", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, -80, 0, 0, "left")
+	})
+	mux.HandleFunc("/ptz/right", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 80, 0, 0, "right")
+	})
+
+	// Zoom commands
+	mux.HandleFunc("/ptz/zoomin", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 0, 0, 10, "zoomin")
+	})
+	mux.HandleFunc("/ptz/zoomout", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 0, 0, -10, "zoomout")
+	})
+	mux.HandleFunc("/ptz/zoomfull", func(w http.ResponseWriter, r *http.Request) {
+		pos := si.GetPTZController().GetCurrentPosition()
+		newZoom := 120.0
+		sendPTZ(w, &pos.Pan, &pos.Tilt, &newZoom, "API: zoomfull", defaultOverride)
+	})
+	mux.HandleFunc("/ptz/zoommid", func(w http.ResponseWriter, r *http.Request) {
+		pos := si.GetPTZController().GetCurrentPosition()
+		newZoom := 60.0
+		sendPTZ(w, &pos.Pan, &pos.Tilt, &newZoom, "API: zoommid", defaultOverride)
+	})
+	mux.HandleFunc("/ptz/zoom/", func(w http.ResponseWriter, r *http.Request) {
+		levelStr := strings.TrimPrefix(r.URL.Path, "/ptz/zoom/")
+		level, err := strconv.Atoi(levelStr)
+		if err != nil || level < 1 || level > 10 {
+			http.Error(w, "zoom level must be 1-10", 400)
+			return
+		}
+		pos := si.GetPTZController().GetCurrentPosition()
+		newZoom := float64(10 + (level-1)*((120-10)/9))
+		sendPTZ(w, &pos.Pan, &pos.Tilt, &newZoom,
+			fmt.Sprintf("API: zoom%d", level), defaultOverride)
+	})
+
+	// Preset commands
+	mux.HandleFunc("/ptz/preset/", func(w http.ResponseWriter, r *http.Request) {
+		presetName := strings.TrimPrefix(r.URL.Path, "/ptz/preset/")
+		// Load presets from scanning.json
+		presets := map[string]ptz.PTZPosition{
+			"bridge1": {Pan: 2377, Tilt: 130, Zoom: 10},
+			"bridge2": {Pan: 2192, Tilt: 270, Zoom: 17},
+			"bridge3": {Pan: 2052, Tilt: 349, Zoom: 10},
+			"river":   {Pan: 1152, Tilt: 205, Zoom: 10},
+			"river1":  {Pan: 1152, Tilt: 205, Zoom: 10},
+			"river2":  {Pan: 1007, Tilt: 97, Zoom: 29},
+		}
+		pos, ok := presets[presetName]
+		if !ok {
+			http.Error(w, "unknown preset: "+presetName, 404)
+			return
+		}
+		sendPTZ(w, &pos.Pan, &pos.Tilt, &pos.Zoom,
+			fmt.Sprintf("API: preset %s", presetName), defaultOverride)
+	})
+
+	// Stay/linger - extend override without moving
+	mux.HandleFunc("/ptz/stay", func(w http.ResponseWriter, r *http.Request) {
+		csm.SetManualOverride(time.Now().Add(stayOverride))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":                 true,
+			"command":            "stay",
+			"override_remaining": csm.ManualOverrideRemaining(),
+		})
+	})
+
+	// Release - cancel override immediately
+	mux.HandleFunc("/ptz/release", func(w http.ResponseWriter, r *http.Request) {
+		csm.ClearManualOverride()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"command": "release",
+		})
+	})
+
+	// Overlay toggle commands: /show/target, /show/console, /show/pip, /show/status
+	mux.HandleFunc("/show/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/show/")
+		if name == "" {
+			http.Error(w, "usage: /show/{target|console|pip|status}", 400)
+			return
+		}
+		ok := overlays.Toggle(name, true)
+		if !ok {
+			http.Error(w, "unknown overlay: "+name+". Options: target, console, pip, status", 404)
+			return
+		}
+		debugMsg("API", fmt.Sprintf("Overlay '%s' enabled via API", name))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"overlay": name,
+			"enabled": true,
+		})
+	})
+
+	// Hide overlays: /hide/target, /hide/console, /hide/pip, /hide/status
+	mux.HandleFunc("/hide/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/hide/")
+		if name == "" {
+			http.Error(w, "usage: /hide/{target|console|pip|status}", 400)
+			return
+		}
+		ok := overlays.Toggle(name, false)
+		if !ok {
+			http.Error(w, "unknown overlay: "+name, 404)
+			return
+		}
+		debugMsg("API", fmt.Sprintf("Overlay '%s' disabled via API", name))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"overlay": name,
+			"enabled": false,
+		})
+	})
+
+	// Status endpoint
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		pos := si.GetPTZController().GetCurrentPosition()
+		mode := si.GetTrackingMode()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"mode":               mode,
+			"pan":                pos.Pan,
+			"tilt":               pos.Tilt,
+			"zoom":               pos.Zoom,
+			"override_active":    csm.IsManualOverrideActive(),
+			"override_remaining": csm.ManualOverrideRemaining(),
+			"overlays": map[string]bool{
+				"target":   *overlays.targetOverlay,
+				"console":  *overlays.terminalOverlay,
+				"status":   *overlays.statusOverlay,
+				"pip":      *overlays.pipZoom,
+			},
+		})
+	})
+
+	addr := "127.0.0.1:" + *apiPort
+	debugMsg("API", fmt.Sprintf("HTTP API server starting on %s", addr))
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		debugMsg("API_ERROR", fmt.Sprintf("HTTP API server failed: %v", err))
+	}
+}
+
 func main() {
 	// Parse command-line flags
 	flag.Parse()
@@ -2691,6 +2986,16 @@ func main() {
 
 	// Pass camera state manager to tracking system
 	spatialIntegration.SetCameraStateManager(cameraStateManager)
+
+	// Start HTTP API server for external control (chat bot, web UI, etc.)
+	overlayState := &OverlayState{
+		statusOverlay:   statusOverlay,
+		targetOverlay:   targetOverlay,
+		terminalOverlay: terminalOverlay,
+		pipZoom:         pipZoomEnabled,
+		debugMode:       debugMode,
+	}
+	go startAPIServer(cameraStateManager, spatialIntegration, overlayState)
 
 	// Move to the first river scanning position on startup using state manager
 	debugMsg("PTZ_DEBUG", "Moving to initial river scanning position")

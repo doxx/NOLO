@@ -85,6 +85,14 @@ type CameraStateManager struct {
 	// Settling delay - time to wait after arrival before transitioning to IDLE
 	settlingDelay time.Duration // Time to wait after position arrival before declaring IDLE
 	arrivalTime   time.Time     // When camera first arrived at target position
+
+	// Manual override (chat/API control)
+	manualOverrideUntil time.Time // When override expires (zero = no override)
+
+	// Clamp tracking - detect when boat is past PTZ limits
+	consecutiveClamps int
+	lastClampedPan    float64
+	lastClampedTilt   float64
 }
 
 // NewCameraStateManager creates a new camera state manager
@@ -220,8 +228,57 @@ func (csm *CameraStateManager) GetTargetPosition() *PTZPosition {
 	return &target
 }
 
+// SetManualOverride sets the manual override expiry time
+func (csm *CameraStateManager) SetManualOverride(until time.Time) {
+	csm.mutex.Lock()
+	defer csm.mutex.Unlock()
+	csm.manualOverrideUntil = until
+	debugMsg("CAMERA_STATE", fmt.Sprintf("Manual override set until %s (%.0fs from now)",
+		until.Format("15:04:05"), time.Until(until).Seconds()))
+}
+
+// ClearManualOverride clears the manual override immediately
+func (csm *CameraStateManager) ClearManualOverride() {
+	csm.mutex.Lock()
+	defer csm.mutex.Unlock()
+	csm.manualOverrideUntil = time.Time{}
+	debugMsg("CAMERA_STATE", "Manual override cleared - AI tracking resumed")
+}
+
+// IsManualOverrideActive returns true if manual override is currently active
+func (csm *CameraStateManager) IsManualOverrideActive() bool {
+	csm.mutex.RLock()
+	defer csm.mutex.RUnlock()
+	return !csm.manualOverrideUntil.IsZero() && time.Now().Before(csm.manualOverrideUntil)
+}
+
+// ManualOverrideRemaining returns seconds remaining on override, 0 if not active
+func (csm *CameraStateManager) ManualOverrideRemaining() float64 {
+	csm.mutex.RLock()
+	defer csm.mutex.RUnlock()
+	if csm.manualOverrideUntil.IsZero() || time.Now().After(csm.manualOverrideUntil) {
+		return 0
+	}
+	return time.Until(csm.manualOverrideUntil).Seconds()
+}
+
+// SendManualCommand sends a PTZ command during manual override (bypasses override check)
+func (csm *CameraStateManager) SendManualCommand(cmd PTZCommand) bool {
+	// This is the same as SendCommand but doesn't check override
+	// Used by the HTTP API to send commands during override
+	return csm.sendCommandInternal(cmd)
+}
+
 // SendCommand sends a PTZ command with rate limiting
 func (csm *CameraStateManager) SendCommand(cmd PTZCommand) bool {
+	// Check manual override - block AI commands while chat/API is controlling
+	if csm.IsManualOverrideActive() {
+		return false
+	}
+	return csm.sendCommandInternal(cmd)
+}
+
+func (csm *CameraStateManager) sendCommandInternal(cmd PTZCommand) bool {
 	csm.mutex.Lock()
 	defer csm.mutex.Unlock()
 
@@ -239,14 +296,29 @@ func (csm *CameraStateManager) SendCommand(cmd PTZCommand) bool {
 		// Validate and clamp positions to limits
 		clampedPan, clampedTilt, clampedZoom, wasClamped := csm.validateAndClampPosition(*cmd.AbsolutePan, *cmd.AbsoluteTilt, *cmd.AbsoluteZoom)
 
-		if wasClamped {
-			debugMsg("CAMERA_STATE", fmt.Sprintf("⚠️ Command %s had invalid position - clamped to safe limits", cmd.Reason))
-		}
-
 		// Round all positions to integers before storing as target
 		roundedPan := math.Round(clampedPan)
 		roundedTilt := math.Round(clampedTilt)
 		roundedZoom := math.Round(clampedZoom)
+
+		if wasClamped {
+			debugMsg("CAMERA_STATE", fmt.Sprintf("⚠️ Command %s had invalid position - clamped to safe limits", cmd.Reason))
+			// Track consecutive clamps to detect stuck-at-limit condition
+			if csm.lastClampedPan == roundedPan && csm.lastClampedTilt == roundedTilt {
+				csm.consecutiveClamps++
+				if csm.consecutiveClamps >= 3 {
+					debugMsg("CAMERA_STATE", fmt.Sprintf("🚫 %d consecutive clamps to same position (Pan=%.0f, Tilt=%.0f) - boat past limits, rejecting",
+						csm.consecutiveClamps, roundedPan, roundedTilt))
+					return false
+				}
+			} else {
+				csm.consecutiveClamps = 1
+				csm.lastClampedPan = roundedPan
+				csm.lastClampedTilt = roundedTilt
+			}
+		} else {
+			csm.consecutiveClamps = 0
+		}
 
 		csm.targetPosition = &PTZPosition{
 			Pan:  roundedPan,
