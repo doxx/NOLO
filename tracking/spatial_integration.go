@@ -2093,7 +2093,7 @@ func (si *SpatialIntegration) cleanupLostBoats() {
 
 		// P1 STALENESS CHECK: If no actual boat-class detection for 2 seconds, drop lock
 		// This prevents people/seawall from keeping a ghost "boat" alive
-		if boat.IsLocked && !boat.LastP1Seen.IsZero() && time.Since(boat.LastP1Seen) > 2*time.Second {
+		if boat.IsLocked && !boat.LastP1Seen.IsZero() && time.Since(boat.LastP1Seen) > 5*time.Second {
 			si.debugMsg("P1_STALE_UNLOCK", fmt.Sprintf("🔓 Boat %s unlocked: no P1 (boat-class) detection for %.1fs — likely false positive",
 				boat.ID, time.Since(boat.LastP1Seen).Seconds()), boat.ID)
 			boat.IsLocked = false
