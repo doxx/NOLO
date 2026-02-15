@@ -48,6 +48,7 @@ type CommandHandler struct {
 	noloAPI     string // NOLO HTTP API base URL
 	service     *youtube.Service
 	liveChatID  string
+	schedule    *ScheduleManager
 	riverData   *RiverData
 }
 
@@ -74,7 +75,7 @@ var (
 		// Overlays
 		"show": true, "hide": true,
 		// Info
-		"boats": true, "weather": true, "tide": true,
+		"boats": true, "weather": true, "tide": true, "schedule": true,
 		// Help
 		"commands": true,
 	}
@@ -260,7 +261,7 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 		log.Printf("[EXECUTE] Sending commands list to %s", cmd.User)
 		ch.SendChatMessage("I'm an AI camera you can control! Move: #up #down #left #right | Zoom: #zoomin #zoomout #zoomfull #zoommid | Presets: #bridge1 #bridge2 #bridge3 #river")
 		time.Sleep(1 * time.Second)
-		ch.SendChatMessage("#boats #weather #tide for info | #stay hold position | #auto release to AI | #show.target #show.pip overlays | 2 cmds/30s")
+		ch.SendChatMessage("#boats #weather #tide #schedule for info | #stay hold position | #auto release to AI | #show.target #show.pip overlays | 2 cmds/30s")
 		return
 
 	case "weather":
@@ -276,6 +277,23 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 	case "boats":
 		if ch.riverData != nil {
 			ch.SendChatMessage(ch.riverData.GetBoats())
+		}
+		return
+	case "schedule":
+		if ch.schedule != nil {
+			upcoming := ch.schedule.GetUpcomingEvents(120) // Next 2 hours
+			if len(upcoming) == 0 {
+				ch.SendChatMessage("No vessels scheduled in the next 2 hours. Source: Biscayne Bay Pilots")
+			} else {
+				msgs := []string{}
+				for _, e := range upcoming {
+					if len(msgs) >= 3 {
+						break // Max 3 events per request
+					}
+					msgs = append(msgs, FormatEventAnnouncement(e))
+				}
+				ch.SendChatMessage("Upcoming: " + strings.Join(msgs, " | "))
+			}
 		}
 		return
 
@@ -772,6 +790,45 @@ func main() {
 		handler.riverData.sendChatFn = func(msg string) { handler.SendChatMessage(msg) }
 		handler.riverData.Start()
 
+		// Start port schedule announcements (bbpilots.com) — scrape mode
+		schedule := NewScheduleManager()
+		handler.schedule = schedule
+		go func() {
+			if err := schedule.FetchSchedule(); err != nil {
+				log.Printf("[SCHEDULE] Initial fetch failed: %v", err)
+			} else {
+				log.Printf("[SCHEDULE] Loaded schedule")
+				if summary := schedule.GetTodaysSummary(); summary != "" {
+					handler.SendChatMessage(summary)
+				}
+			}
+
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if schedule.NeedsRefresh() {
+						if err := schedule.FetchSchedule(); err != nil {
+							log.Printf("[SCHEDULE] Refresh failed: %v", err)
+						}
+					}
+					upcoming := schedule.GetUpcomingEvents(30)
+					for _, event := range upcoming {
+						if event.Type == "CRUISE" || event.Type == "YACHT" {
+							msg := FormatEventAnnouncement(event)
+							handler.SendChatMessage(msg)
+							schedule.MarkAnnounced(event.Vessel, event.Time)
+							log.Printf("[SCHEDULE] Announced: %s", msg)
+							time.Sleep(2 * time.Second)
+						}
+					}
+				}
+			}
+		}()
+
 		scrapeBot.PollMessages(ctx)
 		return
 	}
@@ -819,6 +876,51 @@ func main() {
 	// Start river data feeds with chat send function
 	handler.riverData.sendChatFn = func(msg string) { handler.SendChatMessage(msg) }
 	handler.riverData.Start()
+
+	// Start port schedule announcements (bbpilots.com)
+	schedule := NewScheduleManager()
+	handler.schedule = schedule
+	go func() {
+		// Initial fetch
+		if err := schedule.FetchSchedule(); err != nil {
+			log.Printf("[SCHEDULE] Initial fetch failed: %v", err)
+		} else {
+			// Post today's summary on startup
+			if summary := schedule.GetTodaysSummary(); summary != "" {
+				handler.SendChatMessage(summary)
+			}
+		}
+
+		// Check every 5 minutes for upcoming events
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Refresh schedule if stale
+				if schedule.NeedsRefresh() {
+					if err := schedule.FetchSchedule(); err != nil {
+						log.Printf("[SCHEDULE] Refresh failed: %v", err)
+					}
+				}
+
+				// Announce events coming up in next 30 minutes
+				upcoming := schedule.GetUpcomingEvents(30)
+				for _, event := range upcoming {
+					// Only announce cruise ships and yachts (most interesting for viewers)
+					if event.Type == "CRUISE" || event.Type == "YACHT" {
+						msg := FormatEventAnnouncement(event)
+						handler.SendChatMessage(msg)
+						schedule.MarkAnnounced(event.Vessel, event.Time)
+						log.Printf("[SCHEDULE] Announced: %s", msg)
+						time.Sleep(2 * time.Second) // Don't spam
+					}
+				}
+			}
+		}
+	}()
 
 	// Create and start chat bot
 	bot := NewChatBot(service, liveChatID, handler)
