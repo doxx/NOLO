@@ -1505,8 +1505,16 @@ func (si *SpatialIntegration) updateExistingBoat(boat *TrackedBoat, centerX, cen
 			boat.DetectionCount), boat.ID)
 	}
 
-	// Update tracking priority (boats with more detections get higher priority)
-	boat.TrackingPriority = float64(boat.DetectionCount) * boat.Confidence
+	// Update tracking priority — boats with people are much more interesting
+	basePriority := float64(boat.DetectionCount) * boat.Confidence
+	if boat.HasP2Objects && boat.P2Count > 0 {
+		// People inside boat box = confirmed real boat + great content
+		// Each person adds 50% priority bonus (1 person = 1.5x, 3 people = 2.5x)
+		peopleFactor := 1.0 + float64(boat.P2Count)*0.5
+		boat.TrackingPriority = basePriority * peopleFactor
+	} else {
+		boat.TrackingPriority = basePriority
+	}
 }
 
 // calculateBoatVelocity calculates pixel velocity for a boat using simple direct approach (like July 6th version)
@@ -1546,10 +1554,26 @@ func (si *SpatialIntegration) calculateBoatVelocity(boat *TrackedBoat) {
 	movementY := float64(endPoint.Y - startPoint.Y)
 
 	// Calculate velocity directly - NO COMPENSATION
-	boat.PixelVelocity.X = movementX / frameTimeDiff
-	boat.PixelVelocity.Y = movementY / frameTimeDiff
+	rawVelX := movementX / frameTimeDiff
+	rawVelY := movementY / frameTimeDiff
 
-	si.debugMsg("VELOCITY_CALC", fmt.Sprintf("✅ Boat %s SIMPLE velocity: (%.1f, %.1f) px/s over %.1fs (%d points)",
+	// VELOCITY CAP: Clamp to 150 px/s to filter camera-movement artifacts
+	// Real boats rarely exceed 100 px/s in pixel space. Spikes of 2000+ px/s
+	// are always camera panning contaminating the velocity calculation.
+	const maxVelocity = 150.0
+	speed := math.Sqrt(rawVelX*rawVelX + rawVelY*rawVelY)
+	if speed > maxVelocity {
+		scale := maxVelocity / speed
+		boat.PixelVelocity.X = rawVelX * scale
+		boat.PixelVelocity.Y = rawVelY * scale
+		si.debugMsg("VELOCITY_CAP", fmt.Sprintf("⚠️ Boat %s velocity capped: (%.0f,%.0f) → (%.0f,%.0f) px/s (speed %.0f → %.0f)",
+			boat.ID, rawVelX, rawVelY, boat.PixelVelocity.X, boat.PixelVelocity.Y, speed, maxVelocity), boat.ID)
+	} else {
+		boat.PixelVelocity.X = rawVelX
+		boat.PixelVelocity.Y = rawVelY
+	}
+
+	si.debugMsg("VELOCITY_CALC", fmt.Sprintf("✅ Boat %s velocity: (%.1f, %.1f) px/s over %.1fs (%d points)",
 		boat.ID, boat.PixelVelocity.X, boat.PixelVelocity.Y, frameTimeDiff, historyCount), boat.ID)
 }
 
@@ -1747,20 +1771,36 @@ func (si *SpatialIntegration) calculateOptimalZoom(boat *TrackedBoat, currentZoo
 				velocityFactor = 1.3 // Increase zoom for stationary boats
 			}
 
-			// Progressive zoom formula: Start at 25, build up to 60 based on stability
-			stabilityZoom := 25.0 + (stabilityFactor * 25.0) // 25-50 based on detection count
-			confidenceBonus := confidenceFactor * 15.0       // +0-15 based on confidence
+			// Progressive zoom formula (v8n-tuned): More aggressive zoom for confirmed boats
+			stabilityZoom := 25.0 + (stabilityFactor * 30.0) // 25-55 based on detection count
+			confidenceBonus := confidenceFactor * 20.0       // +0-20 based on confidence
 			centeringBonus := centeringFactor * 10.0         // +0-10 based on centering
 
 			targetZoom = stabilityZoom + confidenceBonus + centeringBonus
 			targetZoom *= velocityFactor
 
-			// Person detection bonus (people deserve more zoom!)
-			if boat.HasP2Objects {
-				personBonus := 10.0 + (float64(boat.P2Count) * 3.0) // +10-16 for people
-				targetZoom += personBonus
-				si.debugMsg("ZOOM_PERSON", fmt.Sprintf("👤 Boat %s has %d people - adding +%.1f zoom bonus",
-					boat.ID, boat.P2Count, personBonus), boat.ID)
+			// PEOPLE-BASED ZOOM: More people = deeper zoom (better content)
+			// v8n detects people reliably, so this is now the primary zoom driver
+			if boat.HasP2Objects && boat.P2Count > 0 {
+				var peopleZoomBonus float64
+				switch {
+				case boat.P2Count >= 3:
+					peopleZoomBonus = 40.0 // Party boat! Full zoom
+				case boat.P2Count == 2:
+					peopleZoomBonus = 30.0 // Multiple people, go deep
+				default:
+					peopleZoomBonus = 20.0 // Single person, moderate zoom
+				}
+				targetZoom += peopleZoomBonus
+				si.debugMsg("ZOOM_PEOPLE", fmt.Sprintf("👤 Boat %s has %d people → +%.0f zoom bonus (target: %.0f)",
+					boat.ID, boat.P2Count, peopleZoomBonus, targetZoom), boat.ID)
+			} else {
+				// No people detected — be conservative (might be false positive)
+				if targetZoom > 40.0 {
+					targetZoom = 40.0 // Cap zoom for unvalidated boats
+					si.debugMsg("ZOOM_CAUTIOUS", fmt.Sprintf("⚠️ Boat %s has no people — capping zoom at 40 until validated",
+						boat.ID), boat.ID)
+				}
 			}
 
 			si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🔒 LOCKED STAGE: Boat %s (det:%d, conf:%.2f, centered:%.1f%%, vel:%.1f)",
@@ -2411,22 +2451,50 @@ func (si *SpatialIntegration) selectTargetBoat() {
 		si.targetBoat = bestBoat
 		si.lastTargetSwitch = si.frameCount
 
-		// DETAILED LOCK CRITERIA CHECK
+		// DETAILED LOCK CRITERIA CHECK (v8n-aware: people validate boats)
 		meetsDetectionCriteria := bestBoat.DetectionCount >= si.minDetectionsForLock
 		meetsConfidenceCriteria := bestBoat.Confidence > 0.30
+		hasPeopleInside := bestBoat.HasP2Objects && bestBoat.P2Count > 0
 
-		si.debugMsg("LOCK_CHECK", fmt.Sprintf("🔍 Boat %s lock criteria: detections=%d≥%d?%v, confidence=%.3f>0.30?%v",
+		// PEOPLE-VALIDATES-BOAT: Boats with people get fast-tracked to lock
+		// Boats WITHOUT people AND without movement are likely false positives (river edge, building)
+		velocity := math.Sqrt(bestBoat.PixelVelocity.X*bestBoat.PixelVelocity.X + bestBoat.PixelVelocity.Y*bestBoat.PixelVelocity.Y)
+		isMoving := velocity > 5.0
+		isStationary := !isMoving && bestBoat.DetectionCount > 10 // Stationary for 10+ frames
+
+		// Require movement OR people for locking — stationary objects with no people are false positives
+		meetsValidationCriteria := hasPeopleInside || isMoving || bestBoat.DetectionCount <= 5 // Give new detections a chance
+
+		// If boat has people, reduce detection requirement (instant confidence)
+		if hasPeopleInside && bestBoat.P2Count >= 2 {
+			meetsDetectionCriteria = bestBoat.DetectionCount >= 1 // 2+ people = lock immediately
+		} else if hasPeopleInside {
+			meetsDetectionCriteria = meetsDetectionCriteria || bestBoat.DetectionCount >= 1 // 1 person = still fast
+		}
+
+		// Stationary + no people after 10 frames = reject lock
+		if isStationary && !hasPeopleInside {
+			meetsValidationCriteria = false
+			si.debugMsg("LOCK_REJECT", fmt.Sprintf("🚫 Boat %s rejected: stationary (vel=%.1f) + no people after %d frames — likely false positive",
+				bestBoat.ID, velocity, bestBoat.DetectionCount), bestBoat.ID)
+		}
+
+		si.debugMsg("LOCK_CHECK", fmt.Sprintf("🔍 Boat %s lock: det=%d≥%d?%v, conf=%.2f>0.30?%v, people=%d, moving=%v, valid=%v",
 			bestBoat.ID, bestBoat.DetectionCount, si.minDetectionsForLock, meetsDetectionCriteria,
-			bestBoat.Confidence, meetsConfidenceCriteria), bestBoat.ID)
+			bestBoat.Confidence, meetsConfidenceCriteria, bestBoat.P2Count, isMoving, meetsValidationCriteria), bestBoat.ID)
 
-		// FIXED: Only lock with mature targets (24+ detections + confidence), no early lock
-		if meetsDetectionCriteria && meetsConfidenceCriteria {
+		// Lock only if all criteria met INCLUDING validation
+		if meetsDetectionCriteria && meetsConfidenceCriteria && meetsValidationCriteria {
 			wasAlreadyLocked := si.targetBoat.IsLocked
 			si.targetBoat.IsLocked = true
 
 			if !wasAlreadyLocked {
 				si.targetBoat.LockStrength = math.Min(1.0, si.targetBoat.LockStrength+0.1)
-				si.debugMsg("LOCK_CAMERA", fmt.Sprintf("🔒 Target boat %s LOCKED for camera tracking (mature target for SUPER LOCK)!", si.targetBoat.ID), si.targetBoat.ID)
+				lockReason := "standard"
+				if hasPeopleInside {
+					lockReason = fmt.Sprintf("people-confirmed (%d people)", bestBoat.P2Count)
+				}
+				si.debugMsg("LOCK_CAMERA", fmt.Sprintf("🔒 Target boat %s LOCKED (%s)!", si.targetBoat.ID, lockReason), si.targetBoat.ID)
 			} else {
 				si.targetBoat.LockStrength = math.Min(1.0, si.targetBoat.LockStrength+0.05)
 				si.debugMsg("LOCK_CAMERA", fmt.Sprintf("🔒 Target boat %s just became locked in camera tracking!", si.targetBoat.ID), si.targetBoat.ID)
