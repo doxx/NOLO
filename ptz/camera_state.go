@@ -89,6 +89,13 @@ type CameraStateManager struct {
 	// Manual override (chat/API control)
 	manualOverrideUntil time.Time // When override expires (zero = no override)
 
+	// External movement detection — detect when someone else controls the camera
+	lastKnownPosition  *PTZPosition // Last position NOLO saw
+	lastNOLOCommand    time.Time    // When NOLO last sent a command
+	externalTakeover   bool         // True when external control detected
+	externalIdleSince  time.Time    // When external control stopped moving
+	externalResumeTime time.Duration // How long camera must be idle to resume (30s)
+
 	// Clamp tracking - detect when boat is past PTZ limits
 	consecutiveClamps int
 	lastClampedPan    float64
@@ -105,6 +112,9 @@ func NewCameraStateManager(controller Controller) *CameraStateManager {
 		maxCommandTime:  15 * time.Second,
 		rateLimitDelay:  100 * time.Millisecond, // 100ms rate limiting (faster response during idle periods)
 		settlingDelay:   100 * time.Millisecond, // 100ms settling delay after arrival
+
+		// External movement detection
+		externalResumeTime: 30 * time.Second, // Resume AI after 30s of idle
 
 		// Set default limits - software limits should match hardware limits unless user overrides
 		limits: PTZLimits{
@@ -275,12 +285,19 @@ func (csm *CameraStateManager) SendCommand(cmd PTZCommand) bool {
 	if csm.IsManualOverrideActive() {
 		return false
 	}
+	// Check external takeover - block AI commands while someone else controls the camera
+	if csm.IsExternalTakeover() {
+		return false
+	}
 	return csm.sendCommandInternal(cmd)
 }
 
 func (csm *CameraStateManager) sendCommandInternal(cmd PTZCommand) bool {
 	csm.mutex.Lock()
 	defer csm.mutex.Unlock()
+
+	// Track that NOLO is sending a command (for external movement detection)
+	csm.lastNOLOCommand = time.Now()
 
 	// Rate limit commands - reject if too soon after last command
 	now := time.Now()
@@ -431,9 +448,74 @@ func (csm *CameraStateManager) monitorPosition() {
 			return
 
 		case <-ticker.C:
+			csm.checkExternalMovement()
 			csm.checkArrival()
 		}
 	}
+}
+
+// checkExternalMovement detects when something other than NOLO moves the camera
+func (csm *CameraStateManager) checkExternalMovement() {
+	current := csm.controller.GetCurrentPosition()
+
+	csm.mutex.Lock()
+	defer csm.mutex.Unlock()
+
+	// Initialize on first run
+	if csm.lastKnownPosition == nil {
+		pos := current
+		csm.lastKnownPosition = &pos
+		return
+	}
+
+	// Calculate how much the camera moved since last check
+	deltaPan := math.Abs(current.Pan - csm.lastKnownPosition.Pan)
+	deltaTilt := math.Abs(current.Tilt - csm.lastKnownPosition.Tilt)
+	deltaZoom := math.Abs(current.Zoom - csm.lastKnownPosition.Zoom)
+	moved := deltaPan > 3 || deltaTilt > 3 || deltaZoom > 3
+
+	// Update last known position
+	pos := current
+	csm.lastKnownPosition = &pos
+
+	// If camera moved and NOLO didn't send a command recently (>2s ago), it's external
+	timeSinceNOLO := time.Since(csm.lastNOLOCommand)
+	if moved && timeSinceNOLO > 2*time.Second && csm.state == IDLE {
+		if !csm.externalTakeover {
+			csm.externalTakeover = true
+			csm.externalIdleSince = time.Time{} // Reset idle timer
+			debugMsg("CAMERA_STATE", fmt.Sprintf("🎮 EXTERNAL CONTROL DETECTED — camera moved (Pan:%+.0f Tilt:%+.0f Zoom:%+.0f) without NOLO command (last cmd %.1fs ago). AI tracking paused.",
+				current.Pan-csm.lastKnownPosition.Pan, current.Tilt-csm.lastKnownPosition.Tilt, current.Zoom-csm.lastKnownPosition.Zoom, timeSinceNOLO.Seconds()))
+		}
+		csm.externalIdleSince = time.Time{} // Camera is still moving externally
+		return
+	}
+
+	// If in external takeover mode, check if camera has been idle long enough to resume
+	if csm.externalTakeover {
+		if moved {
+			// Still moving externally
+			csm.externalIdleSince = time.Time{}
+		} else {
+			// Camera is idle
+			if csm.externalIdleSince.IsZero() {
+				csm.externalIdleSince = time.Now()
+				debugMsg("CAMERA_STATE", "🎮 External control stopped — waiting 30s idle before resuming AI")
+			} else if time.Since(csm.externalIdleSince) > csm.externalResumeTime {
+				csm.externalTakeover = false
+				csm.externalIdleSince = time.Time{}
+				debugMsg("CAMERA_STATE", fmt.Sprintf("✅ Camera idle for %.0fs — resuming AI tracking",
+					csm.externalResumeTime.Seconds()))
+			}
+		}
+	}
+}
+
+// IsExternalTakeover returns true if external control has been detected
+func (csm *CameraStateManager) IsExternalTakeover() bool {
+	csm.mutex.RLock()
+	defer csm.mutex.RUnlock()
+	return csm.externalTakeover
 }
 
 // checkArrival checks if camera has arrived at target and transitions to IDLE
