@@ -1723,32 +1723,32 @@ func (si *SpatialIntegration) calculateOptimalZoom(boat *TrackedBoat, currentZoo
 	const minZoom = 10.0  // Minimum zoom level
 	const maxZoom = 120.0 // Maximum zoom level
 
-	// === PROGRESSIVE ZOOM SYSTEM ===
-	// Start conservative, increase gradually as tracking becomes more stable
+	// === PROGRESSIVE ZOOM SYSTEM (v8n-tuned: faster zoom-in) ===
+	// v8n gives high-confidence detections from frame 1, so we zoom faster
 	var targetZoom float64
 
-	// Stage 1: INITIAL DETECTION (1-3 detections) - Keep zoom LOW for fast movement
-	if boat.DetectionCount <= 3 {
-		targetZoom = 15.0 // Very conservative - fast camera movement
-		si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🚀 INITIAL STAGE: Boat %s (det:%d) → Conservative zoom %.1f for fast movement",
+	// Stage 1: FIRST DETECTION (1 frame only) — start at scan zoom, just acquired
+	if boat.DetectionCount <= 1 {
+		targetZoom = 18.0 // Match scan zoom level
+		si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🚀 ACQUIRED: Boat %s (det:%d) → Zoom %.1f",
 			boat.ID, boat.DetectionCount, targetZoom), boat.ID)
 		return math.Max(minZoom, math.Min(maxZoom, targetZoom))
 	}
 
-	// Stage 2: BUILDING CONFIDENCE (4-6 detections) - Gradual increase
-	if boat.DetectionCount <= 6 {
-		baseZoom := 20.0
-		confidenceBonus := (boat.Confidence - 0.3) * 15.0 // Up to +15 for high confidence
+	// Stage 2: CONFIRMING (2-3 detections) — zoom in quickly, v8n is confident
+	if boat.DetectionCount <= 3 {
+		baseZoom := 25.0
+		confidenceBonus := (boat.Confidence - 0.3) * 30.0 // v8n at 0.7 = +12 bonus
 		targetZoom = baseZoom + confidenceBonus
 
-		si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("📈 BUILDING STAGE: Boat %s (det:%d, conf:%.2f) → Base %.1f + Conf bonus %.1f = %.1f",
-			boat.ID, boat.DetectionCount, boat.Confidence, baseZoom, confidenceBonus, targetZoom), boat.ID)
+		si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("📈 CONFIRMING: Boat %s (det:%d, conf:%.2f) → %.1f",
+			boat.ID, boat.DetectionCount, boat.Confidence, targetZoom), boat.ID)
 		return math.Max(minZoom, math.Min(maxZoom, targetZoom))
 	}
 
-	// Stage 3: LOCKED TRACKING (7-23 detections) - More aggressive zoom based on stability
-	if boat.DetectionCount <= 23 { // Changed from 11 to 23 to accommodate 24+ for SUPER LOCK
-		baseZoom := 25.0
+	// Stage 3: LOCKED TRACKING (4+ detections) — full zoom logic with people bonus
+	if boat.DetectionCount <= 23 {
+		baseZoom := 35.0 // v8n: start higher, we're confident it's real
 
 		if boat.IsLocked {
 			// Locked boat - calculate stability-based zoom
@@ -1797,10 +1797,10 @@ func (si *SpatialIntegration) calculateOptimalZoom(boat *TrackedBoat, currentZoo
 				si.debugMsg("ZOOM_PEOPLE", fmt.Sprintf("👤 Boat %s has %d people → +%.0f zoom bonus (target: %.0f)",
 					boat.ID, boat.P2Count, peopleZoomBonus, targetZoom), boat.ID)
 			} else {
-				// No people detected — be conservative (might be false positive)
-				if targetZoom > 40.0 {
-					targetZoom = 40.0 // Cap zoom for unvalidated boats
-					si.debugMsg("ZOOM_CAUTIOUS", fmt.Sprintf("⚠️ Boat %s has no people — capping zoom at 40 until validated",
+				// No people detected — moderate caution (might be false positive at distance)
+				if targetZoom > 60.0 {
+					targetZoom = 60.0 // Cap zoom for unvalidated boats (still useful zoom)
+					si.debugMsg("ZOOM_CAUTIOUS", fmt.Sprintf("⚠️ Boat %s has no people — capping zoom at 60 until validated",
 						boat.ID), boat.ID)
 				}
 			}
