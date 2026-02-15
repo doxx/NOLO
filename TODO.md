@@ -23,6 +23,19 @@
 
 ## Planned
 
+### Camera Upgrade: Hikvision DS-2DF8C842IXG-ELW (8MP/4K, 42× zoom)
+- [ ] Best value upgrade: $2,678, same Hikvision ISAPI compatibility
+- [ ] 8MP (3840x2160) vs current 4MP (2688x1520) — sharper image, better YOLO detection at distance
+- [ ] 42× optical zoom vs current 12× — 3.5x more zoom range for boat tracking
+- [ ] 1/1.2" sensor vs current 1/2.8" — dramatically better night/low-light performance
+- [ ] 500m IR vs current 50m — 10x nighttime range
+- [ ] DarkFighter + AcuSense AI built-in
+- [ ] IP67/IK10 weatherproof
+- [ ] Server can handle it: GPU at 15%, CPU at 15%, 14 cores idle, YOLO input is always 640x640
+- [ ] NOLO changes needed: update frame size, PTZ zoom limits (10-420?), re-calibrate pixels-per-unit
+- [ ] Also considered DS-2DF8836I5X-AELW ($5,738) — laser IR, 2/3" sensor, 36× zoom. Not worth 2x price for marginal gains. Laser IR not needed for river monitoring.
+- [ ] Add timestamp overlay to stream (bottom-left, "Feb 15, 2026 8:30 AM" format)
+
 ### Direct-to-YouTube FFmpeg (Bypass SRS + Broadcast)
 - [ ] Add `-youtube-direct` flag to NOLO's setupFFmpeg()
 - [ ] Add camera audio RTSP input with safety flags (timeout, reconnect)
