@@ -10,9 +10,16 @@
 - [ ] Add OpenAI summary generation (needs API key configured as runtime flag)
 - [ ] Anonymized chat topic extraction for richer summaries (no usernames)
 
-### YouTube API Quota
-- [ ] Waiting for Google quota increase approval (requested 1M units/day)
-- [ ] Record screencast demo for YouTube API compliance review
+### YouTube API Quota & Multi-Project Upload
+- [ ] Create two new Google Cloud projects: rivercam-pub1 and rivercam-pub2
+- [ ] Enable YouTube Data API v3 on both, create OAuth credentials, authorize against channel
+- [ ] Update recorder to alternate between pub1/pub2 credentials (odd/even segments or AM/PM split)
+- [ ] Switch to 2-hour segments (12/day): pub1 handles 6 uploads, pub2 handles 6 uploads
+- [ ] Each file ~12-13GB instead of 51GB - faster upload, faster YouTube processing
+- [ ] Add resumable upload support so interrupted uploads can continue after restart
+- [ ] Don't restart nolo-recorder while upload is in progress (add upload-in-progress check)
+- [ ] Clean up orphaned recordings on disk after failed uploads
+- [ ] Still waiting for Google quota increase approval (requested 1M units/day)
 - [ ] Once approved: switch chat reading from scrape to official API for lower latency
 - [ ] Once approved: enable `#commands` reply without quota concerns
 
