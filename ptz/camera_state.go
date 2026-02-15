@@ -478,16 +478,35 @@ func (csm *CameraStateManager) checkExternalMovement() {
 	pos := current
 	csm.lastKnownPosition = &pos
 
-	// If camera moved and NOLO didn't send a command recently (>2s ago), it's external
-	timeSinceNOLO := time.Since(csm.lastNOLOCommand)
-	if moved && timeSinceNOLO > 2*time.Second && csm.state == IDLE {
-		if !csm.externalTakeover {
+	// EXTERNAL DETECTION: Compare actual position to NOLO's target.
+	// If the camera is NOT where NOLO told it to go, something else moved it.
+	// This works in ANY state (IDLE, MOVING, tracking, scanning).
+	if csm.targetPosition != nil && !csm.externalTakeover {
+		targetDeltaPan := math.Abs(current.Pan - csm.targetPosition.Pan)
+		targetDeltaTilt := math.Abs(current.Tilt - csm.targetPosition.Tilt)
+		targetDeltaZoom := math.Abs(current.Zoom - csm.targetPosition.Zoom)
+
+		// If camera diverged significantly from NOLO's target AND NOLO sent the command
+		// more than 3 seconds ago (give time for camera to reach target), it's external.
+		timeSinceCmd := time.Since(csm.lastNOLOCommand)
+		diverged := targetDeltaPan > 50 || targetDeltaTilt > 50 || targetDeltaZoom > 20
+
+		if diverged && timeSinceCmd > 3*time.Second {
 			csm.externalTakeover = true
-			csm.externalIdleSince = time.Time{} // Reset idle timer
-			debugMsg("CAMERA_STATE", fmt.Sprintf("🎮 EXTERNAL CONTROL DETECTED — camera moved (Pan:%+.0f Tilt:%+.0f Zoom:%+.0f) without NOLO command (last cmd %.1fs ago). AI tracking paused.",
-				current.Pan-csm.lastKnownPosition.Pan, current.Tilt-csm.lastKnownPosition.Tilt, current.Zoom-csm.lastKnownPosition.Zoom, timeSinceNOLO.Seconds()))
+			csm.externalIdleSince = time.Time{}
+			debugMsg("CAMERA_STATE", fmt.Sprintf("EXTERNAL CONTROL DETECTED - camera diverged from target (Pan:%+.0f Tilt:%+.0f Zoom:%+.0f). AI paused.",
+				current.Pan-csm.targetPosition.Pan, current.Tilt-csm.targetPosition.Tilt, current.Zoom-csm.targetPosition.Zoom))
+			return
 		}
-		csm.externalIdleSince = time.Time{} // Camera is still moving externally
+	}
+
+	// Also detect external movement when IDLE with no target (scanning pauses, etc.)
+	timeSinceNOLO := time.Since(csm.lastNOLOCommand)
+	if moved && timeSinceNOLO > 2*time.Second && !csm.externalTakeover {
+		csm.externalTakeover = true
+		csm.externalIdleSince = time.Time{}
+		debugMsg("CAMERA_STATE", fmt.Sprintf("EXTERNAL CONTROL DETECTED - unexpected movement (last NOLO cmd %.1fs ago). AI paused.",
+			timeSinceNOLO.Seconds()))
 		return
 	}
 
@@ -500,11 +519,12 @@ func (csm *CameraStateManager) checkExternalMovement() {
 			// Camera is idle
 			if csm.externalIdleSince.IsZero() {
 				csm.externalIdleSince = time.Now()
-				debugMsg("CAMERA_STATE", "🎮 External control stopped — waiting 30s idle before resuming AI")
+				debugMsg("CAMERA_STATE", "External control stopped - waiting 30s idle before resuming AI")
 			} else if time.Since(csm.externalIdleSince) > csm.externalResumeTime {
 				csm.externalTakeover = false
 				csm.externalIdleSince = time.Time{}
-				debugMsg("CAMERA_STATE", fmt.Sprintf("✅ Camera idle for %.0fs — resuming AI tracking",
+				csm.targetPosition = nil // Clear stale target
+				debugMsg("CAMERA_STATE", fmt.Sprintf("Camera idle for %.0fs - resuming AI tracking",
 					csm.externalResumeTime.Seconds()))
 			}
 		}
