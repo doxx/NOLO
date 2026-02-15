@@ -32,11 +32,53 @@
 - [ ] Test audio RTSP hang resilience
 - [ ] This eliminates SRS + broadcast services, reduces latency by ~15-20 seconds
 
-### YOLO Model Upgrade
-- [ ] Evaluate YOLOv8/v10 for improved boat detection accuracy
-- [ ] Test with captured frames from `/tmp/nolo-analysis/frames/`
-- [ ] Compare detection confidence and size thresholds vs YOLOv3-tiny
+### Seawall False Positive (Critical)
+- [ ] v8n confidently detects the concrete seawall/riverwalk as a "boat" every frame
+- [ ] Once locked, people sitting on benches/walkway near the seawall keep the detection alive
+- [ ] Garbage cans, benches, and park objects also get detected as boats when zoomed in
+- [ ] Frame edge filter helps at scan zoom but fails once camera zooms in (seawall no longer touches edges)
+- [ ] P1 staleness timeout doesn't help — seawall gets ongoing P1 "boat" detections from v8n
+- [ ] Stationary + no people check at lock time helps but doesn't maintain for already-locked boats
+- [ ] Possible fixes to explore:
+  - PTZ exclusion zones (known seawall Pan/Tilt coordinates → reject detections)
+  - Require minimum PTZ-space displacement over 5s to maintain lock (seawall never moves in world space)
+  - Machine-learning based: train a small classifier on seawall vs real boat crops
+  - Fine-tune YOLOv8n on Miami River data to not detect seawall
+  - Boat aspect ratio filter (seawall has unusual width:height ratio vs real boats)
+  - Require people inside box within 10 seconds to maintain lock (real boats have visible crew)
+
+### Post-Lock Linger Too Long
+- [ ] After losing a boat, camera lingers at the last position for too long before scanning
+- [ ] Post-lock holdover is 15 seconds — should maybe be 8-10s
+- [ ] During holdover the camera shows empty water which is boring for viewers
+
+### Zoom Inheritance on Re-acquisition
+- [ ] When a boat is lost and re-detected 1-2s later in the same area, zoom resets to Z18
+- [ ] Should carry over zoom level from the previous tracking session
+- [ ] If a new boat appears within ~200px of where we just lost one, inherit the old zoom
+- [ ] This would eliminate the 1-2 second zoom lag on re-acquisition
+
+### YOLOv8n Completed (Feb 14, 2026)
+- [x] Upgraded from YOLOv3-tiny to YOLOv8n (92% confidence vs 44%, 193 FPS vs 128 FPS)
+- [x] Optimized v8 parser: bulk DataPtrFloat32 eliminates 705K CGO calls/frame
+- [x] Properly exported ONNX with fixed shapes, opset 12, FP32
+- [x] Runtime model selection via -yolo-model flag (v3-tiny fallback)
+- [x] People-validates-boat: boats with people get instant lock, priority boost
+- [x] Progressive zoom by people count (1=Z70, 2=Z85, 3+=Z100)
+- [x] Velocity cap at 150 px/s (filters camera-movement artifacts)
+- [x] P2 centroid tracking disabled (v8n detects people too well for this)
+- [x] P2 lock maintenance removed (prevented seawall→people chain)
+- [x] Frame edge filter (rejects detections touching 2+ frame edges)
+- [x] P1 staleness unlock after 5s without boat-class detection
+- [x] Instant zoom targeting (removed progressive stages and rate limiter)
+- [x] Confidence thresholds raised for v8n: P1=0.45, P2=0.35
+- [x] Scanning positions bumped to Z18 minimum
+
+### YOLO Model Further Improvements
 - [ ] Custom training on Miami River boat dataset (extract from recordings)
+- [ ] Fine-tune to reject seawall/riverwalk/bridge structures
+- [ ] Evaluate YOLOv8s (small) for even better accuracy with GPU headroom available
+- [ ] Evaluate maritime-specific YOLO models (Roboflow/HuggingFace)
 
 ### AIS Vessel Data Improvements
 - [ ] Cross-reference AIS vessel type codes for richer announcements (tug, cargo, passenger, etc.)

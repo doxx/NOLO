@@ -1741,7 +1741,7 @@ func (si *SpatialIntegration) calculateOptimalZoom(boat *TrackedBoat, currentZoo
 	// From frame 2+: calculate final zoom target and send it immediately
 	// Base zoom from confidence (v8n gives 0.45-0.92 for real boats)
 	confidenceFactor := math.Min((boat.Confidence-0.3)/0.4, 1.0) // 0-1 scale
-	targetZoom = 40.0 + (confidenceFactor * 25.0) // 40-65 base from confidence alone
+	targetZoom = 40.0 + (confidenceFactor * 25.0)                // 40-65 base from confidence alone
 
 	// Velocity adjustment — fast boats need slightly less zoom to stay in frame
 	velocity := math.Sqrt(boat.PixelVelocity.X*boat.PixelVelocity.X + boat.PixelVelocity.Y*boat.PixelVelocity.Y)
