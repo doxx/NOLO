@@ -4002,12 +4002,29 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 										continue
 									}
 
-									// FRAME EDGE FILTER: Reject P1 detections touching 2+ frame edges
-									// The river seawall/concrete edge creates huge "boat" detections
-									// that touch the bottom + side of the frame in an L-shape.
-									// Real boats are surrounded by water and don't hug frame borders.
+									// SEAWALL FILTER: Reject unrealistically large "boats" at frame edges
+									// The seawall is detected as a massive boat (30%+ of frame) touching
+									// the edge. Real boats entering from the edge are normal-sized.
+									// Small/medium boats at edges = real boats entering frame (allowed)
+									// Giant boats at edges = seawall/structure false positive (rejected)
 									if isP1Object(className) {
-										edgeMargin := 15 // pixels from edge to count as "touching"
+										edgeMargin := 15
+										touchesEdge := left <= edgeMargin || top <= edgeMargin ||
+											left+width >= int(originalWidth)-edgeMargin ||
+											top+height >= int(originalHeight)-edgeMargin
+										isHuge := float64(width) > float64(originalWidth)*0.30 ||
+											float64(height) > float64(originalHeight)*0.30
+
+										if touchesEdge && isHuge {
+											// Giant boat at edge = seawall. Still show in overlay for debug.
+											rect := image.Rect(left, top, left+width, top+height)
+											allRawDetections = append(allRawDetections, rect)
+											allRawClassNames = append(allRawClassNames, className)
+											allRawConfidences = append(allRawConfidences, float64(maxScore))
+											continue
+										}
+
+										// Keep the 2+ edge filter as backup
 										edgeCount := 0
 										if left <= edgeMargin {
 											edgeCount++

@@ -268,10 +268,10 @@ func NewSpatialIntegration(ptzCtrl ptz.Controller, frameWidth, frameHeight int, 
 		frameCount:           0,
 
 		// Post-lock holdover settings (REMOVED: will be replaced by RECOVERY mode)
-		postLockHoldover: 15 * time.Second, // Linger for 15 seconds after losing locked boat (was 10s)
+		postLockHoldover: 5 * time.Second, // v8n: short holdover, fast re-detect (was 15s)
 
 		// RECOVERY mode settings
-		recoveryTimeout: 30 * time.Second, // Maximum 30 seconds in recovery mode
+		recoveryTimeout: 8 * time.Second, // v8n: quick recovery, don't stare at water (was 30s)
 
 		// Dynamic tracking priority configuration
 		p1TrackList:     p1TrackList,
