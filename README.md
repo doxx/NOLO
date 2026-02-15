@@ -14,7 +14,7 @@ See it in action here: https://www.youtube.com/@MiamiRiverCamera/streams
 
 ## The Philosophy Behind AI-Integrated Systems
 
-Why build this software? While everyone uses AI to enable code, I'm using code to *enable* AI. This project began as an experiment to test a fundamental thesis: **AI integration isn't just coming to everything—it's inevitable, and I think the most powerful implementations will be hybrid systems that blend local and cloud intelligence.**
+Why build this software? While everyone uses AI to enable code, I'm using code to *enable* AI. This project began as an experiment to test a fundamental thesis: **AI integration isn't just coming to everything - it's inevitable, and I think the most powerful implementations will be hybrid systems that blend local and cloud intelligence.**
 
 ### The Ubiquitous AI Future
 
@@ -43,7 +43,7 @@ The same math issue exists in cyber security detections and monitoring or really
 
 ### The Hybrid Architecture 
 
-This led to the system's hybrid design: local AI handles the high-frequency, low-latency tasks (object detection, tracking, movement control), while cloud AI provides deep reasoning and analysis for complex decision-making. This isn't just more efficient—it's more intelligent.
+This led to the system's hybrid design: local AI handles the high-frequency, low-latency tasks (object detection, tracking, movement control), while cloud AI provides deep reasoning and analysis for complex decision-making. This isn't just more efficient - it's more intelligent.
 
 **Local AI handles**: Frame-by-frame analysis, real-time tracking, immediate responses  
 **Cloud AI handles**: Complex scene interpretation, behavioral analysis, strategic decision-making
@@ -57,11 +57,11 @@ This hybrid model represents the future across domains:
 
 We're witnessing a fundamental transformation in how intelligence is distributed through our technological ecosystem. Rather than centralizing AI in distant data centers, we're creating a web of interconnected intelligence that spans from the smallest embedded processors to the largest cloud infrastructures and overlapping APIs.
 
-This camera system is proof of concept for a world where every device isn't just connected—it's *intelligent*. Where the boundary between hardware and software dissolves into responsive, adaptive systems that learn, predict, and evolve.
+This camera system is proof of concept for a world where every device isn't just connected - it's *intelligent*. Where the boundary between hardware and software dissolves into responsive, adaptive systems that learn, predict, and evolve.
 
 We're going to wire up AI to things that have controls and it's going to be very interesting to watch "things" become more than just "things". 
 
-The question isn't whether AI will be embedded in everything. The question is whether we'll build these systems thoughtfully, with proper attention to latency, cost, privacy, and resilience. This project suggests we can—and we must. 
+The question isn't whether AI will be embedded in everything. The question is whether we'll build these systems thoughtfully, with proper attention to latency, cost, privacy, and resilience. This project suggests we can - and we must. 
 
 
 ## Personal Story
@@ -505,12 +505,12 @@ At 2600×1426 resolution, this creates **~1.34 quadrillion unique pixel-position
 - One-time calibration
 
 **PTZ Camera Reality (This Project):**
-- 🔥 **360+ million different scenes** based on camera position
-- 🔥 **Dynamic spatial relationships** - same object appears different at each zoom/angle
-- 🔥 **Real-time coordinate transformation** between pixel space and physical PTZ coordinates
-- 🔥 **Continuous recalibration** as camera moves through 3D space
-- 🔥 **Predictive tracking** across position transitions
-- 🔥 **Multi-scale object detection** - boats look different at 1x vs 12x zoom
+- **360+ million different scenes** based on camera position
+- **Dynamic spatial relationships** - same object appears different at each zoom/angle
+- **Real-time coordinate transformation** between pixel space and physical PTZ coordinates
+- **Continuous recalibration** as camera moves through 3D space
+- **Predictive tracking** across position transitions
+- **Multi-scale object detection** - boats look different at 1x vs 12x zoom
 
 ### **What Makes This Implementation Unique**
 
@@ -539,7 +539,7 @@ Okay on to the software...
 - **Spatial Tracking**: Real-world coordinate tracking with camera position awareness
 - **PTZ-Space Lead Tracking**: Predicts boat position using calibration-based velocity in PTZ coordinates (zoom-independent)
 - **Coast Tracking**: When YOLO loses a boat, camera keeps panning at last known velocity (like a cameraman tracking through occlusion)
-- **Edge Bias**: First-frame direction prediction — boats detected on frame edges get lead bias toward frame center
+- **Edge Bias**: First-frame direction prediction - boats detected on frame edges get lead bias toward frame center
 - **People-Validates-Boat**: Boats with visible people get instant lock and deeper zoom; stationary objects without people are rejected as false positives
 - **Progressive Zoom by People Count**: 0 people = Z60 max, 1 = Z70, 2 = Z85, 3+ = Z100+
 - **LOCK/SUPER LOCK Modes**: Progressive tracking confidence levels (2+ → 24+ detections)
@@ -547,10 +547,18 @@ Okay on to the software...
 - **Recovery Mode**: PTZ-space velocity extrapolation to predict where lost boats went
 
 ### **PTZ Camera Control**
-- **Smart Camera Movement**: Smooth tracking with velocity compensation
-- **Scanning Patterns**: Customizable area scanning when no targets detected
+- **Smart Camera Movement**: Smooth tracking with velocity compensation and 5% dead zone
+- **Scanning Patterns**: Customizable area scanning when no targets detected (scanning.json)
+- **External Control Detection**: Auto-pauses AI when someone manually controls the camera, resumes after 30s idle
 - **Position Limits**: Safety boundaries to prevent mechanical damage
 - **State Management**: Coordinated camera commands with latency compensation
+
+### **YouTube Chat Integration**
+- **Interactive Camera Control**: Viewers can move the camera with #up, #down, #left, #right, #zoomin, etc.
+- **Port Schedule Announcements**: Scrapes Biscayne Bay Pilots (bbpilots.com) for cruise ship and yacht arrivals/departures
+- **AIS Vessel Tracking**: Real-time vessel announcements via AISStream.io websocket
+- **Weather and Tides**: NWS weather and NOAA tide data via #weather, #tide commands
+- **Rate Limiting**: 1 command per 10 seconds global, 2 per user per 30 seconds
 
 ### **Real-time Performance**
 - **YOLOv8n at 193 FPS**: GPU-accelerated inference via CUDA + cuDNN
@@ -779,7 +787,7 @@ Usage of ./NOLO:
 
 - **Go 1.23+**
 - **OpenCV 4.x** with Go bindings (`gocv`) built with CUDA support
-- **YOLO Model**: YOLOv8n ONNX format (`models/yolov8n.onnx`) — exported with fixed shapes, opset 12
+- **YOLO Model**: YOLOv8n ONNX format (`models/yolov8n.onnx`) - exported with fixed shapes, opset 12
 - **PTZ Camera**: Hikvision-compatible HTTP API with absolute position feedback
 - **RTSP Stream**: Camera video feed (2688x1520 recommended)
 - **NVIDIA GPU**: RTX series recommended for 193 FPS inference (CPU fallback available with v3-tiny)
@@ -792,7 +800,7 @@ This system supports multiple YOLO architectures with runtime model selection vi
 
 | Model | Flag | FPS (RTX 5050) | Confidence | Use Case |
 |-------|------|----------------|------------|----------|
-| **YOLOv8n** (default) | `-yolo-model v8n` | **193 FPS** | 92% on boats | **Recommended** — dramatically better detection |
+| **YOLOv8n** (default) | `-yolo-model v8n` | **193 FPS** | 92% on boats | **Recommended** - dramatically better detection |
 | **YOLOv3-tiny** (legacy) | `-yolo-model v3-tiny` | 128 FPS | 44% on boats | Fallback for older hardware |
 
 **YOLOv8n upgrade (Feb 2026):** The v8n model finds boats that v3-tiny completely misses, with 2x higher confidence. Zero-CGO optimized parser processes 8,400 detection candidates per frame using bulk `DataPtrFloat32()` instead of per-element access. People-validates-boat logic uses person detections inside boat bounding boxes to confirm real boats vs false positives.
@@ -801,34 +809,34 @@ This system supports multiple YOLO architectures with runtime model selection vi
 
 The system can detect and track **80 different object types** from the COCO dataset:
 
-**🚢 Vehicles & Transportation:**
+**Vehicles & Transportation:**
 - boat, car, bicycle, motorbike, aeroplane, bus, train, truck
 
-**👥 People & Accessories:**  
+**People & Accessories:**  
 - person, backpack, umbrella, handbag, tie, suitcase
 
-**🏠 Furniture & Indoor Objects:**
+**Furniture & Indoor Objects:**
 - chair, sofa, bed, diningtable, toilet, tvmonitor, laptop, mouse, remote, keyboard
 
-**🍕 Food & Kitchen:**
+**Food & Kitchen:**
 - bottle, wine glass, cup, fork, knife, spoon, bowl, banana, apple, sandwich, orange, broccoli, carrot, hot dog, pizza, donut, cake, microwave, oven, toaster, sink, refrigerator
 
-**🐕 Animals:**
+**Animals:**
 - bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe
 
-**⚽ Sports & Recreation:**
+**Sports & Recreation:**
 - frisbee, skis, snowboard, sports ball, kite, baseball bat, baseball glove, skateboard, surfboard, tennis racket
 
-**🌱 Plants & Environment:**
+**Plants & Environment:**
 - pottedplant
 
 **Tools & Household:**
 - scissors, hair drier, toothbrush, clock, vase, book, teddy bear
 
-**🚦 Infrastructure:**
+**Infrastructure:**
 - traffic light, fire hydrant, stop sign, parking meter, bench
 
-**📱 Electronics:**
+**Electronics:**
 - cell phone
 
 ### **Model Files & Links**
@@ -849,7 +857,7 @@ models/
 
 ### **Performance Characteristics**
 
-**YOLOv8n (nano) — Recommended:**
+**YOLOv8n (nano) - Recommended:**
 - **GPU-accelerated**: 193 FPS on RTX 5050 (CUDA + cuDNN)
 - **92% confidence** on boats (vs 44% with v3-tiny)
 - **Detects boats v3-tiny misses**: Found boats in 6/6 test frames vs 3/6 for v3-tiny
@@ -984,7 +992,7 @@ You were once a pirate named Captain BlackEye, and somehow you got trapped insid
 # Captain BlackEye in action:
 ./ai_commentary 
 
-💬 Captain BlackEye says: "Ahoy! Another rich asshole in a yacht that's 
+Captain BlackEye says: "Ahoy! Another rich asshole in a yacht that's 
 bigger than my entire pirate ship ever was. Look at 'em, probably doesn't 
 even know port from starboard. Miami's finest maritime morons, I tell ya!"
 ```
@@ -1245,7 +1253,7 @@ Different encoding configurations for various hardware setups:
 
 ### **Key Features**
 
-#### **🔍 Process Health Monitoring**
+#### **Process Health Monitoring**
 ```go
 // Monitors multiple health indicators
 - FFmpeg output activity (15-second timeout)
@@ -1255,7 +1263,7 @@ Different encoding configurations for various hardware setups:
 - Memory and resource usage
 ```
 
-#### **🔄 Automatic Recovery System**
+#### **Automatic Recovery System**
 - **Unlimited restarts** (configurable)
 - **Smart restart delays** prevent resource exhaustion  
 - **Graceful shutdown** handling (SIGTERM → SIGKILL if needed)
@@ -1620,4 +1628,4 @@ This project stands on the shoulders of giants. NOLO would not be possible witho
 - Much better RTMP handling than nginx for live streaming
 - Reliable, efficient real-time media server
 
-Built with ❤️ for watchign crazy boat stuff.
+Built for watching crazy boat stuff.

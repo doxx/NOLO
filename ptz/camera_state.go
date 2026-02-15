@@ -90,10 +90,10 @@ type CameraStateManager struct {
 	manualOverrideUntil time.Time // When override expires (zero = no override)
 
 	// External movement detection — detect when someone else controls the camera
-	lastKnownPosition  *PTZPosition // Last position NOLO saw
-	lastNOLOCommand    time.Time    // When NOLO last sent a command
-	externalTakeover   bool         // True when external control detected
-	externalIdleSince  time.Time    // When external control stopped moving
+	lastKnownPosition  *PTZPosition  // Last position NOLO saw
+	lastNOLOCommand    time.Time     // When NOLO last sent a command
+	externalTakeover   bool          // True when external control detected
+	externalIdleSince  time.Time     // When external control stopped moving
 	externalResumeTime time.Duration // How long camera must be idle to resume (30s)
 
 	// Clamp tracking - detect when boat is past PTZ limits
