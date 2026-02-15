@@ -231,8 +231,9 @@ func uploadToYouTube(service *youtube.Service, filePath string) error {
 			CategoryId:  "19", // Travel & Events
 		},
 		Status: &youtube.VideoStatus{
-			PrivacyStatus: "public",
-			MadeForKids:   false,
+			PrivacyStatus:           "public",
+			MadeForKids:             false,
+			SelfDeclaredMadeForKids: false,
 		},
 	}
 
