@@ -65,3 +65,6 @@ youtube-chat/river_data_check.go
 # Recorder binary and recordings
 recorder/recorder
 recordings/
+
+# PyTorch weights (large, use ONNX exports instead)
+*.pt
