@@ -204,6 +204,7 @@ type TrackedBoat struct {
 	Confidence     float64
 	FirstDetected  time.Time
 	LastSeen       time.Time
+	LastP1Seen     time.Time // Last time an actual boat-class (P1) detection fed this object
 	DetectionCount int
 	LostFrames     int // Track how many frames since last detection
 
@@ -1323,6 +1324,7 @@ func (si *SpatialIntegration) updateExistingBoat(boat *TrackedBoat, centerX, cen
 	// Reset lost frames (boat was found)
 	boat.LostFrames = 0
 	boat.LastSeen = time.Now()
+	boat.LastP1Seen = time.Now() // This is a P1 (boat-class) detection update
 	boat.DetectionCount++
 	boat.Confidence = math.Max(boat.Confidence, confidence)
 
@@ -2053,6 +2055,7 @@ func (si *SpatialIntegration) createNewTrackedObject(centerX, centerY int, area,
 		Confidence:       confidence,
 		FirstDetected:    now,
 		LastSeen:         now,
+		LastP1Seen:       now, // Created from a P1 detection
 		DetectionCount:   1,
 		LostFrames:       0,
 		CurrentPixel:     image.Point{X: centerX, Y: centerY},
@@ -2082,16 +2085,19 @@ func (si *SpatialIntegration) cleanupLostBoats() {
 	var removedBoats []string
 
 	for id, boat := range si.allBoats {
-		// 🔥 P2-BASED LOCK MAINTENANCE - Use people detection to maintain locks even when P1 is lost!
-		if boat.LostFrames > 0 && (boat.IsLocked || boat.LockStrength > 0.8) && boat.HasP2Objects {
-			// P1 lost but P2 active - MAINTAIN LOCK using P2 data
-			boat.LostFrames = 0 // Reset - we're not really "lost"
-			boat.LastSeen = time.Now()
-			boat.UseP2Target = true // Target the people, not the boat center
+		// P2 LOCK MAINTENANCE DISABLED for v8n
+		// v8n detects people everywhere (riverwalk, benches, park). Using people to
+		// maintain a "boat" lock causes the camera to zoom into pedestrians when
+		// the original boat detection was actually a seawall false positive.
+		// A boat must have ongoing P1 (boat-class) detections to stay locked.
 
-			si.debugMsg("P2_LOCK_MAINTENANCE", fmt.Sprintf("🔒👤 LOCK maintained via P2! P1 lost but %d people detected - targeting P2 centroid (%.2f quality)",
-				boat.P2Count, boat.P2Quality), boat.ID)
-			continue // Skip removal check since we're maintaining lock via P2
+		// P1 STALENESS CHECK: If no actual boat-class detection for 2 seconds, drop lock
+		// This prevents people/seawall from keeping a ghost "boat" alive
+		if boat.IsLocked && !boat.LastP1Seen.IsZero() && time.Since(boat.LastP1Seen) > 2*time.Second {
+			si.debugMsg("P1_STALE_UNLOCK", fmt.Sprintf("🔓 Boat %s unlocked: no P1 (boat-class) detection for %.1fs — likely false positive",
+				boat.ID, time.Since(boat.LastP1Seen).Seconds()), boat.ID)
+			boat.IsLocked = false
+			boat.LockStrength = 0
 		}
 
 		if boat.LostFrames > si.maxLostFrames {

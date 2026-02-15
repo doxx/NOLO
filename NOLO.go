@@ -4002,6 +4002,35 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 										continue
 									}
 
+									// FRAME EDGE FILTER: Reject P1 detections touching 2+ frame edges
+									// The river seawall/concrete edge creates huge "boat" detections
+									// that touch the bottom + side of the frame in an L-shape.
+									// Real boats are surrounded by water and don't hug frame borders.
+									if isP1Object(className) {
+										edgeMargin := 15 // pixels from edge to count as "touching"
+										edgeCount := 0
+										if left <= edgeMargin {
+											edgeCount++
+										}
+										if top <= edgeMargin {
+											edgeCount++
+										}
+										if left+width >= int(originalWidth)-edgeMargin {
+											edgeCount++
+										}
+										if top+height >= int(originalHeight)-edgeMargin {
+											edgeCount++
+										}
+										if edgeCount >= 2 {
+											// Skip — but still show in raw overlay for debugging
+											rect := image.Rect(left, top, left+width, top+height)
+											allRawDetections = append(allRawDetections, rect)
+											allRawClassNames = append(allRawClassNames, className)
+											allRawConfidences = append(allRawConfidences, float64(maxScore))
+											continue
+										}
+									}
+
 									rect := image.Rect(left, top, left+width, top+height)
 
 									// Store raw detection for overlay
