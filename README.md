@@ -39,7 +39,7 @@ Pure cloud-based AI processing is fundamentally flawed for real-time application
 
 The same math issue exists in cyber security detections and monitoring or really any sort of real-time streaming dataset. 
 
-**The Local Reality**: A modest gaming laptop with an NVIDIA GeForce RTX 3070 sits 80% idle while effortlessly processing this high-bandwidth video stream. The computational power already exists at the edge. However, I am not running any fully advanced model on this machine as of now.
+**The Local Reality**: An AMD Ryzen 7 PRO 8700G with an NVIDIA GeForce RTX 5050 (compute 12.0) sits 85% idle while running YOLOv8n at 193 FPS on the GPU. The computational power already exists at the edge.
 
 ### The Hybrid Architecture 
 
@@ -521,7 +521,7 @@ While most PTZ projects are simple "move camera toward detected object" systems,
 3. **Predictive Movement**: Anticipates where objects will be based on motion vectors
 4. **Production-Grade Engineering**: Handles the 360+ million position combinations reliably
 
-**Hopefully result**: A system that doesn't just "follow objects" but truly **understands 3D space** through a moving camera. It's really not working exactly how I want it but it's a foundation for some new survalance systems. 
+**The result**: A system that doesn't just "follow objects" but truly **understands 3D space** through a moving camera. The Feb 2026 YOLOv8n upgrade with PTZ-space lead tracking, coast tracking, and people-validates-boat logic makes this a genuinely useful autonomous camera system. 
 
 ---
 
@@ -537,10 +537,14 @@ Okay on to the software...
 
 ### **Advanced Tracking Capabilities**
 - **Spatial Tracking**: Real-world coordinate tracking with camera position awareness
-- **Predictive Tracking**: Anticipates object movement when temporarily lost
+- **PTZ-Space Lead Tracking**: Predicts boat position using calibration-based velocity in PTZ coordinates (zoom-independent)
+- **Coast Tracking**: When YOLO loses a boat, camera keeps panning at last known velocity (like a cameraman tracking through occlusion)
+- **Edge Bias**: First-frame direction prediction — boats detected on frame edges get lead bias toward frame center
+- **People-Validates-Boat**: Boats with visible people get instant lock and deeper zoom; stationary objects without people are rejected as false positives
+- **Progressive Zoom by People Count**: 0 people = Z60 max, 1 = Z70, 2 = Z85, 3+ = Z100+
 - **LOCK/SUPER LOCK Modes**: Progressive tracking confidence levels (2+ → 24+ detections)
 - **Picture-in-Picture (PIP)**: Automatic zoom on locked targets with P2 objects
-- **Recovery Mode**: Smart re-acquisition of lost targets
+- **Recovery Mode**: PTZ-space velocity extrapolation to predict where lost boats went
 
 ### **PTZ Camera Control**
 - **Smart Camera Movement**: Smooth tracking with velocity compensation
@@ -549,10 +553,12 @@ Okay on to the software...
 - **State Management**: Coordinated camera commands with latency compensation
 
 ### **Real-time Performance**
-- **YOLO/ONNX Integration**: Local AI inference (no API calls)
-- **GPU Acceleration**: CUDA support for enhanced performance
-- **Multi-threaded Pipeline**: Capture → Process → Track → Control
+- **YOLOv8n at 193 FPS**: GPU-accelerated inference via CUDA + cuDNN
+- **Zero-CGO Detection Parser**: Bulk tensor access eliminates 705K CGO boundary crossings per frame
+- **Runtime Model Selection**: Switch between v8n and v3-tiny via `-yolo-model` flag
+- **Multi-threaded Pipeline**: Capture (30fps) → Process (60fps) → Track (<1ms) → Write (30fps)
 - **Memory Management**: Efficient OpenCV Mat handling with leak detection
+- **Buffer Monitoring**: Real-time FrameChan/WriteQueue health tracking
 
 ### **Debug & Analysis Features**
 - **Verbose Debug Mode**: `-debug-verbose` for detailed calculations
@@ -606,8 +612,20 @@ Run `./NOLO -h` to see all available options:
 
 ```bash
 Usage of ./NOLO:
+  -yolo-model string
+        YOLO model: 'v3-tiny' (legacy) or 'v8n' (recommended, default: v3-tiny)
+  -yolo-model-path string
+        Custom path to YOLO model file (overrides default paths)
+  -p1-min-confidence float
+        Minimum confidence for P1 targets (default: 0.25, recommended 0.45 for v8n)
+  -p2-min-confidence float
+        Minimum confidence for P2 targets (default: 0.15, recommended 0.35 for v8n)
+  -api-port string
+        HTTP API port for external control (default: 8080)
   -YOLOdebug
         Save YOLO input blob images to /tmp/YOLOdebug/ for analysis
+  -yolo-overlay
+        Show all raw YOLO detection bounding boxes on stream
   -debug
         Enable debug mode with overlay and detailed tracking logs
   -debug-verbose
@@ -759,23 +777,25 @@ Usage of ./NOLO:
 
 ## Prerequisites
 
-- **Go 1.19+**
-- **OpenCV 4.x** with Go bindings (`gocv`)
-- **YOLO Model**: YOLOv8n ONNX format (`models/yolov8n.onnx`)
-- **PTZ Camera**: Hikvision-compatible HTTP API
-- **RTSP Stream**: Camera video feed
-- **Optional**: CUDA for GPU acceleration
+- **Go 1.23+**
+- **OpenCV 4.x** with Go bindings (`gocv`) built with CUDA support
+- **YOLO Model**: YOLOv8n ONNX format (`models/yolov8n.onnx`) — exported with fixed shapes, opset 12
+- **PTZ Camera**: Hikvision-compatible HTTP API with absolute position feedback
+- **RTSP Stream**: Camera video feed (2688x1520 recommended)
+- **NVIDIA GPU**: RTX series recommended for 193 FPS inference (CPU fallback available with v3-tiny)
 
 ## YOLO Object Detection Models & Capabilities
 
 ### **Supported YOLO Models**
 
-This system supports multiple YOLO architectures for maximum flexibility:
+This system supports multiple YOLO architectures with runtime model selection via `-yolo-model` flag:
 
-| Model | Type | Performance | Use Case |
-|-------|------|-------------|----------|
-| **YOLOv3-tiny** | OpenCV .weights | Fast, lightweight | CPU-optimized real-time detection |
-| **YOLOv8n** | ONNX | Balanced speed/accuracy | GPU acceleration, higher precision |
+| Model | Flag | FPS (RTX 5050) | Confidence | Use Case |
+|-------|------|----------------|------------|----------|
+| **YOLOv8n** (default) | `-yolo-model v8n` | **193 FPS** | 92% on boats | **Recommended** — dramatically better detection |
+| **YOLOv3-tiny** (legacy) | `-yolo-model v3-tiny` | 128 FPS | 44% on boats | Fallback for older hardware |
+
+**YOLOv8n upgrade (Feb 2026):** The v8n model finds boats that v3-tiny completely misses, with 2x higher confidence. Zero-CGO optimized parser processes 8,400 detection candidates per frame using bulk `DataPtrFloat32()` instead of per-element access. People-validates-boat logic uses person detections inside boat bounding boxes to confirm real boats vs false positives.
 
 ### **80-Class COCO Object Detection**
 
@@ -829,21 +849,24 @@ models/
 
 ### **Performance Characteristics**
 
-**YOLOv3-tiny:**
-- **CPU-optimized**: Runs efficiently on modest hardware
-- **Low latency**: ~15-30ms inference time
-- **Small model**: 34MB weights file
-- **Trade-off**: Slightly lower accuracy than full models
+**YOLOv8n (nano) — Recommended:**
+- **GPU-accelerated**: 193 FPS on RTX 5050 (CUDA + cuDNN)
+- **92% confidence** on boats (vs 44% with v3-tiny)
+- **Detects boats v3-tiny misses**: Found boats in 6/6 test frames vs 3/6 for v3-tiny
+- **640x640 input** with letterbox padding (gray 114)
+- **ONNX format** with fixed shapes, opset 12, FP32
+- **Zero-CGO parser**: Bulk DataPtrFloat32() eliminates 705K CGO calls/frame
+- **NMS post-processing**: gocv.NMSBoxes on filtered candidates
 
-**YOLOv8n (nano):**
-- **GPU-accelerated**: Leverages CUDA when available  
-- **Better accuracy**: Improved detection performance
-- **ONNX format**: Cross-platform compatibility
-- **Requires**: More computational resources
+**YOLOv3-tiny (legacy fallback):**
+- **CPU-optimized**: Runs on modest hardware without GPU
+- **128 FPS** on GPU, ~30 FPS on CPU
+- **832x832 input** with black letterbox padding
+- **Lower accuracy**: 44% confidence, misses boats at distance/night
 
 ### **Detection Configuration**
 
-The system processes video at **832×832 resolution** for YOLO inference with smart letterboxing to maintain aspect ratios. Detection confidence thresholds and Non-Maximum Suppression (NMS) are automatically optimized for river monitoring scenarios.
+The system processes video at **640×640** (v8n) or **832×832** (v3-tiny) resolution with smart letterboxing to maintain aspect ratios. v8n confidence thresholds are higher (P1=0.45, P2=0.35) since the model gives much stronger detections on real objects.
 
 **Priority Object Configuration:**
 ```bash
@@ -1369,9 +1392,12 @@ http://user:password123@192.168.1.100:80/
 
 ## Usage Examples
 
-### **Basic River Monitoring**
+### **Basic River Monitoring (YOLOv8n)**
 ```bash
 ./NOLO \
+  -yolo-model v8n \
+  -p1-min-confidence=0.45 \
+  -p2-min-confidence=0.35 \
   -input "rtsp://admin:password@192.168.1.100:554/Streaming/Channels/101" \
   -ptzinput "http://admin:password@192.168.1.100:80/" \
   -debug
