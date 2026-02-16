@@ -460,9 +460,8 @@ func uploadToYouTube(filePath, title, description string) error {
 // extractFramesForAI pulls 3 frames from the timelapse at 20%, 50%, 80% through
 func extractFramesForAI(timelapseFile string) []string {
 	var files []string
-	for i, pct := range []int{15, 50, 85} {
-		// 2-minute clip = 120 seconds, stay away from edges
-		offset := float64(pct) * 115.0 / 100.0 // cap at 115s to avoid seeking past end
+	for i, offset := range []float64{18, 60, 100} {
+		// Fixed offsets in seconds: early (18s), middle (60s), late (100s) of 2-min clip
 		outFile := filepath.Join(*outputDir, fmt.Sprintf("ai_frame_%d.jpg", i))
 		cmd := exec.Command(*ffmpegPath,
 			"-hide_banner", "-loglevel", "error",
