@@ -382,6 +382,17 @@ func (si *SpatialIntegration) debugMsgVerbose(component, message string, boatID 
 	}
 }
 
+// isSunrisePark checks if the camera should be parked for sunrise viewing
+// Parks at P1110, T020, Z010 from 4:30 AM to 7:30 AM ET
+func (si *SpatialIntegration) isSunrisePark() bool {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Now().In(loc)
+	hour := now.Hour()
+	minute := now.Minute()
+	minuteOfDay := hour*60 + minute
+	return minuteOfDay >= 4*60+30 && minuteOfDay < 7*60+30 // 4:30 AM to 7:30 AM
+}
+
 // UpdateTracking - THE MAIN MULTI-OBJECT TRACKING FUNCTION
 func (si *SpatialIntegration) UpdateTracking(detections []image.Rectangle, classNames []string, confidences []float64, frameData []byte) {
 	// RACE CONDITION FIX: Protect the main tracking loop from concurrent access
@@ -389,6 +400,19 @@ func (si *SpatialIntegration) UpdateTracking(detections []image.Rectangle, class
 	defer si.mu.Unlock()
 
 	si.frameCount++
+
+	// SUNRISE PARK: During sunrise hours, park camera at a scenic position and skip all tracking
+	if si.isSunrisePark() {
+		if si.frameCount%900 == 1 { // Log once every 30 seconds
+			si.debugMsg("SUNRISE", "Camera parked for sunrise viewing (4:30-7:30 AM)")
+		}
+		// Send park command once per minute to hold position
+		if si.frameCount%1800 == 1 {
+			sunriseTarget := SpatialCoordinate{Pan: 1110, Tilt: 20, Zoom: 10}
+			si.executePTZMovement(sunriseTarget, "SUNRISE_PARK")
+		}
+		return // Skip all tracking
+	}
 
 	// Clean up stale data when camera moves
 	si.detectAndCleanupCameraMovement()

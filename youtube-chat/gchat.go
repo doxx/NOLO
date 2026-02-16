@@ -817,7 +817,7 @@ func main() {
 					}
 					upcoming := schedule.GetUpcomingEvents(30)
 					for _, event := range upcoming {
-						if event.Type == "CRUISE" || event.Type == "YACHT" {
+						if event.Type == "YACHT" {
 							msg := FormatEventAnnouncement(event)
 							handler.SendChatMessage(msg)
 							schedule.MarkAnnounced(event.Vessel, event.Time)
@@ -909,13 +909,13 @@ func main() {
 				// Announce events coming up in next 30 minutes
 				upcoming := schedule.GetUpcomingEvents(30)
 				for _, event := range upcoming {
-					// Only announce cruise ships and yachts (most interesting for viewers)
-					if event.Type == "CRUISE" || event.Type == "YACHT" {
+					// Only announce yachts (cruise ships are too frequent and spammy)
+					if event.Type == "YACHT" {
 						msg := FormatEventAnnouncement(event)
 						handler.SendChatMessage(msg)
 						schedule.MarkAnnounced(event.Vessel, event.Time)
 						log.Printf("[SCHEDULE] Announced: %s", msg)
-						time.Sleep(2 * time.Second) // Don't spam
+						time.Sleep(2 * time.Second)
 					}
 				}
 			}
