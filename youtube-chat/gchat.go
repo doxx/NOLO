@@ -805,6 +805,8 @@ func main() {
 
 			ticker := time.NewTicker(5 * time.Minute)
 			defer ticker.Stop()
+			sunriseAnnounced := false
+			sunriseEndAnnounced := false
 			for {
 				select {
 				case <-ctx.Done():
@@ -815,6 +817,23 @@ func main() {
 							log.Printf("[SCHEDULE] Refresh failed: %v", err)
 						}
 					}
+
+					// Sunrise park announcement
+					loc, _ := time.LoadLocation("America/New_York")
+					now := time.Now().In(loc)
+					minuteOfDay := now.Hour()*60 + now.Minute()
+					inSunrise := minuteOfDay >= 4*60+30 && minuteOfDay < 7*60+30
+
+					if inSunrise && !sunriseAnnounced {
+						handler.SendChatMessage("Parking camera for sunrise viewing until 7:30 AM. Enjoy the view!")
+						sunriseAnnounced = true
+						sunriseEndAnnounced = false
+					} else if !inSunrise && sunriseAnnounced && !sunriseEndAnnounced {
+						handler.SendChatMessage("Sunrise viewing complete. AI boat tracking resumed!")
+						sunriseEndAnnounced = true
+						sunriseAnnounced = false
+					}
+
 					upcoming := schedule.GetUpcomingEvents(30)
 					for _, event := range upcoming {
 						if event.Type == "YACHT" {
@@ -894,6 +913,8 @@ func main() {
 		// Check every 5 minutes for upcoming events
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
+		sunriseAnnounced := false
+		sunriseEndAnnounced := false
 		for {
 			select {
 			case <-ctx.Done():
@@ -904,6 +925,22 @@ func main() {
 					if err := schedule.FetchSchedule(); err != nil {
 						log.Printf("[SCHEDULE] Refresh failed: %v", err)
 					}
+				}
+
+				// Sunrise park announcement
+				loc, _ := time.LoadLocation("America/New_York")
+				now := time.Now().In(loc)
+				minuteOfDay := now.Hour()*60 + now.Minute()
+				inSunrise := minuteOfDay >= 4*60+30 && minuteOfDay < 7*60+30
+
+				if inSunrise && !sunriseAnnounced {
+					handler.SendChatMessage("Parking camera for sunrise viewing until 7:30 AM. Enjoy the view!")
+					sunriseAnnounced = true
+					sunriseEndAnnounced = false
+				} else if !inSunrise && sunriseAnnounced && !sunriseEndAnnounced {
+					handler.SendChatMessage("Sunrise viewing complete. AI boat tracking resumed!")
+					sunriseEndAnnounced = true
+					sunriseAnnounced = false
 				}
 
 				// Announce events coming up in next 30 minutes
