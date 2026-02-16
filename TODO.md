@@ -45,6 +45,20 @@
 - [ ] Also considered DS-2DF8836I5X-AELW ($5,738) — laser IR, 2/3" sensor, 36× zoom. Not worth 2x price for marginal gains. Laser IR not needed for river monitoring.
 - [ ] Add timestamp overlay to stream (bottom-left, "Feb 15, 2026 8:30 AM" format)
 
+### Sunrise Time-Lapse Auto-Publisher
+- [ ] Standalone Go program (`sunrise/main.go`) that runs daily
+- [ ] Fetch exact sunrise time from api.sunrise-sunset.org (free, no key)
+- [ ] After the segment MP4 covering sunrise is written, extract 40-min window (sunrise -20min to +20min)
+- [ ] FFmpeg extract: `ffmpeg -ss [offset] -t 2400 -i segment.mp4 -c copy sunrise_raw.mp4`
+- [ ] FFmpeg timelapse: 20x speed (`setpts=PTS/20`), 30fps output, GPU encode
+- [ ] Add background music (track.aac) with fade in/out (3s each)
+- [ ] Optional: slight saturation boost (`eq=saturation=1.2`) for sunrise colors
+- [ ] Output: 2-minute clip at 20Mbps (~300MB)
+- [ ] Upload to YouTube: "Miami River Sunrise - [date]"
+- [ ] Uses separate pub credentials (rivercam-pub1/pub2) for quota
+- [ ] Run via cron or systemd timer after segment completion (~8 AM)
+- [ ] Delete raw extract after upload, keep timelapse for 7 days
+
 ### Direct-to-YouTube FFmpeg (Bypass SRS + Broadcast)
 - [ ] Add `-youtube-direct` flag to NOLO's setupFFmpeg()
 - [ ] Add camera audio RTSP input with safety flags (timeout, reconnect)
