@@ -75,16 +75,29 @@ func main() {
 	os.MkdirAll(*outputDir, 0755)
 
 	// Step 1: Get today's sunrise time
+	loc, _ := time.LoadLocation("America/New_York")
 	sunrise, twilight, err := fetchSunriseTime()
 	if err != nil {
-		log.Fatalf("[SUNRISE] Failed to fetch sunrise time: %v", err)
+		// Fallback: use 7:00 AM ET if API fails
+		log.Printf("[SUNRISE] API failed (%v) - using fallback 6:00 AM to 8:00 AM window", err)
+		today := time.Now().In(loc)
+		sunrise = time.Date(today.Year(), today.Month(), today.Day(), 7, 0, 0, 0, loc)
+		twilight = time.Date(today.Year(), today.Month(), today.Day(), 6, 30, 0, 0, loc)
 	}
 	log.Printf("[SUNRISE] Today's sunrise: %s", sunrise.Format("3:04 PM"))
 	log.Printf("[SUNRISE] Civil twilight: %s", twilight.Format("3:04 PM"))
 
 	// Calculate capture window
-	captureStart := sunrise.Add(-time.Duration(*preMinutes) * time.Minute)
-	captureEnd := sunrise.Add(time.Duration(*postMinutes) * time.Minute)
+	var captureStart, captureEnd time.Time
+	if err != nil {
+		// Fallback: fixed 6 AM to 8 AM window
+		today := time.Now().In(loc)
+		captureStart = time.Date(today.Year(), today.Month(), today.Day(), 6, 0, 0, 0, loc)
+		captureEnd = time.Date(today.Year(), today.Month(), today.Day(), 8, 0, 0, 0, loc)
+	} else {
+		captureStart = sunrise.Add(-time.Duration(*preMinutes) * time.Minute)
+		captureEnd = sunrise.Add(time.Duration(*postMinutes) * time.Minute)
+	}
 	captureDuration := captureEnd.Sub(captureStart)
 	log.Printf("[SUNRISE] Capture window: %s to %s (%v)",
 		captureStart.Format("3:04 PM"), captureEnd.Format("3:04 PM"), captureDuration)
