@@ -14,6 +14,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -48,6 +50,7 @@ var (
 	postMinutes     = flag.Int("post", 20, "Minutes after sunrise to end capture window")
 	speedFactor     = flag.Int("speed", 20, "Time-lapse speed factor (20 = 20x)")
 	dryRun          = flag.Bool("dry-run", false, "Don't upload, just create the timelapse")
+	openaiKey       = flag.String("openai-key", "", "OpenAI API key for generating descriptions")
 
 	// Miami camera location
 	cameraLat = 25.7695
@@ -197,13 +200,25 @@ func processExistingRecording(sunrise, captureStart, captureEnd time.Time) {
 	}
 	log.Printf("[SUNRISE] Timelapse: %.1f MB", float64(info.Size())/(1024*1024))
 
-	// Step 9: Upload to YouTube
+	// Step 9: Generate AI description from 3 frames
+	log.Println("[SUNRISE] Extracting frames for AI description...")
+	frameFiles := extractFramesForAI(timelapseFile)
+	aiDescription := generateAIDescription(frameFiles, sunrise)
+	if aiDescription != "" {
+		log.Printf("[AI] Description: %s", aiDescription)
+	}
+
+	// Step 10: Upload to YouTube
 	if *dryRun {
 		log.Printf("[SUNRISE] Dry run - skipping upload. File: %s", timelapseFile)
 	} else {
 		title := fmt.Sprintf("Miami River Sunrise - %s", sunrise.Format("January 2, 2006"))
-		description := fmt.Sprintf("Sunrise time-lapse from the Miami River camera.\n\nSunrise: %s\n%dx speed, 40-minute window compressed to 2 minutes.\n\nLive stream: https://www.youtube.com/@MiamiRiverCamera/streams",
-			sunrise.Format("3:04 PM EST"), *speedFactor)
+		description := aiDescription
+		if description == "" {
+			description = "Sunrise time-lapse from the Miami River camera."
+		}
+		description += fmt.Sprintf("\n\nSunrise: %s ET\n%dx speed time-lapse\n\nWatch live: https://www.youtube.com/@MiamiRiverCamera/streams",
+			sunrise.Format("3:04 PM"), *speedFactor)
 		log.Println("[SUNRISE] Uploading to YouTube...")
 		err = uploadToYouTube(timelapseFile, title, description)
 		if err != nil {
@@ -440,6 +455,145 @@ func uploadToYouTube(filePath, title, description string) error {
 	}
 
 	return nil
+}
+
+// extractFramesForAI pulls 3 frames from the timelapse at 20%, 50%, 80% through
+func extractFramesForAI(timelapseFile string) []string {
+	var files []string
+	for i, pct := range []int{15, 50, 85} {
+		// 2-minute clip = 120 seconds, stay away from edges
+		offset := float64(pct) * 115.0 / 100.0 // cap at 115s to avoid seeking past end
+		outFile := filepath.Join(*outputDir, fmt.Sprintf("ai_frame_%d.jpg", i))
+		cmd := exec.Command(*ffmpegPath,
+			"-hide_banner", "-loglevel", "error",
+			"-ss", fmt.Sprintf("%.0f", offset),
+			"-i", timelapseFile,
+			"-frames:v", "1",
+			"-q:v", "2",
+			"-y", outFile,
+		)
+		if err := cmd.Run(); err != nil {
+			log.Printf("[AI] Failed to extract frame %d: %v", i, err)
+			continue
+		}
+		files = append(files, outFile)
+	}
+	return files
+}
+
+// generateAIDescription sends frames to GPT-5.2 vision and gets a description
+func generateAIDescription(frameFiles []string, sunrise time.Time) string {
+	if *openaiKey == "" {
+		log.Println("[AI] No OpenAI key provided, skipping AI description")
+		return ""
+	}
+	if len(frameFiles) == 0 {
+		return ""
+	}
+
+	// Build image content parts
+	var imageParts []map[string]interface{}
+
+	// Add text prompt
+	prompt := fmt.Sprintf(
+		"These are 3 frames from a sunrise time-lapse video taken from a camera overlooking the Miami River near Brickell, Miami FL. "+
+			"Sunrise was at %s ET on %s. "+
+			"Write a brief YouTube video description (2-3 sentences). Be informative and descriptive about what's visible - the sky, water, boats, buildings, weather conditions. "+
+			"Don't be overly poetic. Just describe what happened during this sunrise for someone who might want to watch the clip.",
+		sunrise.Format("3:04 PM"), sunrise.Format("January 2, 2006"))
+
+	imageParts = append(imageParts, map[string]interface{}{
+		"type": "text",
+		"text": prompt,
+	})
+
+	// Add each frame as base64 image
+	for _, f := range frameFiles {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			log.Printf("[AI] Failed to read frame %s: %v", f, err)
+			continue
+		}
+		b64 := base64.StdEncoding.EncodeToString(data)
+		imageParts = append(imageParts, map[string]interface{}{
+			"type": "image_url",
+			"image_url": map[string]string{
+				"url":    "data:image/jpeg;base64," + b64,
+				"detail": "low",
+			},
+		})
+	}
+
+	// Build request
+	reqBody := map[string]interface{}{
+		"model": "gpt-5.2",
+		"messages": []map[string]interface{}{
+			{
+				"role":    "user",
+				"content": imageParts,
+			},
+		},
+		"max_completion_tokens": 200,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		log.Printf("[AI] JSON marshal failed: %v", err)
+		return ""
+	}
+
+	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("[AI] Request creation failed: %v", err)
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+*openaiKey)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[AI] API request failed: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		log.Printf("[AI] API error %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+		return ""
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("[AI] Response parse failed: %v", err)
+		return ""
+	}
+
+	if len(result.Choices) > 0 {
+		desc := strings.TrimSpace(result.Choices[0].Message.Content)
+		// Clean up any AI artifacts
+		desc = strings.TrimPrefix(desc, "\"")
+		desc = strings.TrimSuffix(desc, "\"")
+		return desc
+	}
+
+	return ""
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // unused but keeping for reference
