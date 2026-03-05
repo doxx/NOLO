@@ -1,10 +1,11 @@
 // clipper - Extract, caption, and publish clips from NOLO recordings
 //
 // Usage:
-//   ./clipper -file cam_20260216_0800.mp4 -start 57:00 -end 60:00 \
-//     -title "Tugs and Container Ship" -openai-key sk-...
 //
-// It extracts the clip, sends 3 frames to GPT-5.2 for a description,
+//	./clipper -file cam_20260216_0800.mp4 -start 57:00 -end 60:00 \
+//	  -title "Tugs and Container Ship" -openai-key sk-...
+//
+// It extracts the clip, sends 3 frames to GPT-5.3 for a description,
 // combines with the recording's event metadata (weather, tide, vessels),
 // and uploads to YouTube.
 package main
@@ -56,8 +57,8 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime)
 
-	if *inputFile == "" || *startTime == "" || *clipTitle == "" {
-		fmt.Println("Usage: clipper -file <mp4> -start <MM:SS> -title <title> [-end <MM:SS>] [-duration <MM:SS>]")
+	if *inputFile == "" || *startTime == "" {
+		fmt.Println("Usage: clipper -file <mp4> -start <MM:SS> [-title <title>] [-end <MM:SS>] [-duration <MM:SS>]")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -109,26 +110,38 @@ func main() {
 	// Step 3: Find event metadata
 	metadata := findEventMetadata()
 
-	// Step 4: Generate AI description
-	log.Println("[CLIP] Extracting frames for AI description...")
-	frameFiles := extractFrames(finalFile)
-	aiDesc := generateDescription(frameFiles, metadata)
-	if aiDesc != "" {
-		log.Printf("[AI] Description: %s", aiDesc)
-	}
+	// Step 4: Parse date/time from input filename for title context
+	clipDateTime := parseClipDateTime()
 
-	// Step 5: Build full description
+	// Step 5: Generate AI title + description
+	log.Println("[CLIP] Extracting frames for AI...")
+	frameFiles := extractFrames(finalFile)
+	aiTitle, aiDesc := generateTitleAndDescription(frameFiles, metadata, clipDateTime)
+
+	// Use user-provided title as-is, or fall back to AI-generated title
+	finalTitle := *clipTitle
+	if *clipTitle == "" && aiTitle != "" {
+		finalTitle = aiTitle
+	} else if *clipTitle == "" {
+		finalTitle = fmt.Sprintf("Miami River Camera - %s", clipDateTime)
+	}
+	if aiTitle != "" && *clipTitle != "" {
+		log.Printf("[AI] Suggested title: %s", aiTitle)
+	}
+	log.Printf("[CLIP] Final title: %s", finalTitle)
+
+	// Step 6: Build full description
 	description := buildDescription(aiDesc, metadata)
 
-	// Step 6: Upload
+	// Step 7: Upload
 	if *dryRun {
 		log.Println("[CLIP] Dry run - skipping upload")
-		log.Printf("[CLIP] Title: %s", *clipTitle)
+		log.Printf("[CLIP] Title: %s", finalTitle)
 		log.Printf("[CLIP] Description:\n%s", description)
 		log.Printf("[CLIP] File: %s", finalFile)
 	} else {
 		log.Println("[CLIP] Uploading to YouTube...")
-		err = uploadToYouTube(finalFile, *clipTitle, description)
+		err = uploadToYouTube(finalFile, finalTitle, description)
 		if err != nil {
 			log.Fatalf("[CLIP] Upload failed: %v", err)
 		}
@@ -180,7 +193,16 @@ func extractClip(input, output string, startSec, durationSec float64) error {
 	return cmd.Run()
 }
 
+// hasAudioStream probes an input file for audio streams
+func hasAudioStream(input string) bool {
+	cmd := exec.Command(*ffmpegPath, "-hide_banner", "-i", input, "-f", "null", "-")
+	output, _ := cmd.CombinedOutput()
+	return strings.Contains(string(output), "Audio:")
+}
+
 func processClip(input, output string) error {
+	hasAudio := hasAudioStream(input)
+
 	args := []string{"-hide_banner", "-loglevel", "warning", "-i", input}
 
 	var videoFilter string
@@ -188,24 +210,41 @@ func processClip(input, output string) error {
 		videoFilter = fmt.Sprintf("setpts=PTS/%d", *speedup)
 	}
 
-	if *musicFile != "" {
+	if hasAudio {
+		// Source has audio - use it directly
+		log.Println("[CLIP] Source has audio - keeping original audio")
+		if videoFilter != "" {
+			args = append(args, "-filter:v", videoFilter)
+		}
+		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000")
+	} else if *musicFile != "" {
+		// No source audio - fall back to background music
+		log.Printf("[CLIP] No source audio - using background music: %s", *musicFile)
 		args = append(args, "-stream_loop", "-1", "-i", *musicFile)
 
-		audioFilter := fmt.Sprintf("[0:a]volume=0.7[orig];[1:a]volume=%s[music];[orig][music]amix=inputs=2:duration=first[aout]", *musicVolume)
+		// Music with fade in/out
+		audioFilter := fmt.Sprintf("[1:a]volume=%s,afade=t=in:d=3,afade=t=out:st=9999:d=3[aout]", *musicVolume)
 		if videoFilter != "" {
-			args = append(args, "-filter_complex", audioFilter, "-filter:v", videoFilter, "-map", "0:v", "-map", "[aout]")
+			args = append(args, "-filter_complex", audioFilter, "-filter:v", videoFilter,
+				"-map", "0:v", "-map", "[aout]", "-shortest")
 		} else {
-			args = append(args, "-filter_complex", audioFilter, "-map", "0:v", "-map", "[aout]")
+			args = append(args, "-filter_complex", audioFilter,
+				"-map", "0:v", "-map", "[aout]", "-shortest")
 		}
-	} else if videoFilter != "" {
-		args = append(args, "-filter:v", videoFilter)
+		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000")
+	} else {
+		// No audio at all
+		log.Println("[CLIP] No source audio and no music file - video only")
+		if videoFilter != "" {
+			args = append(args, "-filter:v", videoFilter)
+		}
+		args = append(args, "-an")
 	}
 
 	args = append(args,
 		"-c:v", "h264_nvenc", "-preset", "p7", "-profile:v", "high",
 		"-b:v", "20000k", "-maxrate", "22000k", "-bufsize", "40000k",
 		"-pix_fmt", "yuv420p",
-		"-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
 		"-y", output,
 	)
 
@@ -292,21 +331,50 @@ func extractFrames(videoFile string) []string {
 	return files
 }
 
-func generateDescription(frameFiles []string, metadata string) string {
+// parseClipDateTime extracts a human-readable date/time from the input filename
+func parseClipDateTime() string {
+	baseName := filepath.Base(*inputFile)
+	re := regexp.MustCompile(`cam_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})`)
+	match := re.FindStringSubmatch(baseName)
+	if match == nil {
+		return time.Now().Format("Jan 2, 2006")
+	}
+
+	loc, _ := time.LoadLocation("America/New_York")
+	year, _ := strconv.Atoi(match[1])
+	month, _ := strconv.Atoi(match[2])
+	day, _ := strconv.Atoi(match[3])
+	hour, _ := strconv.Atoi(match[4])
+	minute, _ := strconv.Atoi(match[5])
+
+	t := time.Date(year, time.Month(month), day, hour, minute, 0, 0, loc)
+
+	// Add the start offset
+	startSec := parseTime(*startTime)
+	t = t.Add(time.Duration(startSec) * time.Second)
+
+	return t.Format("Monday Jan 2")
+}
+
+func generateTitleAndDescription(frameFiles []string, metadata, clipDateTime string) (string, string) {
 	if *openaiKey == "" || len(frameFiles) == 0 {
-		return ""
+		return "", ""
 	}
 
 	var parts []map[string]interface{}
 
 	prompt := "These are frames from a video clip recorded by an AI-powered PTZ camera on the Miami River near Brickell Bridge, Miami FL. "
+	if clipDateTime != "" {
+		prompt += "Recorded: " + clipDateTime + ". "
+	}
 	if *extraInfo != "" {
 		prompt += *extraInfo + " "
 	}
 	if metadata != "" {
-		prompt += "Event metadata from the recording: " + metadata[:min(len(metadata), 500)] + " "
+		prompt += "Event metadata: " + metadata[:min(len(metadata), 500)] + " "
 	}
-	prompt += "Write a YouTube video description (2-3 sentences). Be informative and descriptive about what's visible. Mention any vessels, weather, or notable activity."
+	prompt += "\n\nRespond in this exact JSON format:\n"
+	prompt += `{"title": "DayOfWeek Mon DD - Short descriptive title (e.g. 'Monday Feb 17 - Sunrise Time-Lapse Over the Miami River at Brickell'). ALWAYS start with the day of week and date.", "description": "2-3 sentence YouTube description. Be informative about what's visible - vessels, weather, activity. Don't repeat the title."}`
 
 	parts = append(parts, map[string]interface{}{
 		"type": "text",
@@ -332,7 +400,7 @@ func generateDescription(frameFiles []string, metadata string) string {
 		"messages": []map[string]interface{}{
 			{"role": "user", "content": parts},
 		},
-		"max_completion_tokens": 250,
+		"max_completion_tokens": 300,
 	}
 
 	jsonData, _ := json.Marshal(reqBody)
@@ -343,14 +411,14 @@ func generateDescription(frameFiles []string, metadata string) string {
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		log.Printf("[AI] Request failed: %v", err)
-		return ""
+		return "", ""
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
 		log.Printf("[AI] Error %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
-		return ""
+		return "", ""
 	}
 
 	var result struct {
@@ -362,10 +430,32 @@ func generateDescription(frameFiles []string, metadata string) string {
 	}
 	json.Unmarshal(body, &result)
 
-	if len(result.Choices) > 0 {
-		return strings.TrimSpace(result.Choices[0].Message.Content)
+	if len(result.Choices) == 0 {
+		return "", ""
 	}
-	return ""
+
+	content := strings.TrimSpace(result.Choices[0].Message.Content)
+	// Strip markdown code fences if present
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var aiResponse struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal([]byte(content), &aiResponse); err != nil {
+		log.Printf("[AI] Failed to parse JSON response, using raw: %v", err)
+		return "", content
+	}
+
+	title := aiResponse.Title
+
+	log.Printf("[AI] Title: %s", title)
+	log.Printf("[AI] Description: %s", aiResponse.Description)
+
+	return title, aiResponse.Description
 }
 
 func buildDescription(aiDesc, metadata string) string {

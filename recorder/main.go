@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,7 +14,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,14 +44,15 @@ type YouTubeProject struct {
 }
 
 var (
-	rtmpInput      = flag.String("input", "rtmp://localhost/live/stream", "RTMP input URL (SRS)")
+	rtmpInput      = flag.String("input", "rtmp://localhost/live/stream", "Video input URL (RTMP from SRS)")
+	audioInput     = flag.String("audio", "", "Audio input URL (RTSP camera stream, e.g. rtsp://admin:pass@192.168.0.59:554/Streaming/Channels/201)")
 	recordingDir   = flag.String("dir", "/home/blyon/NOLO/recordings", "Directory for recordings")
 	credentialsDir = flag.String("credentials-dir", "../youtube-reset/credentials", "Directory containing pub*/client_secret.json and pub*/token.json")
 	uploadEnabled  = flag.Bool("upload", true, "Enable YouTube uploads")
-	deleteAfter    = flag.Bool("delete-after-upload", false, "Delete local file after successful upload (overridden by retention)")
-	retention      = flag.Duration("retention", retentionPeriod, "Keep raw recordings for this duration, delete older")
+	retention      = flag.Duration("retention", retentionPeriod, "Keep recordings for this duration, delete older (applies to both recordings/ and uploaded/)")
 	channelTitle   = flag.String("title-prefix", "Miami River Camera", "Video title prefix")
 	ffmpegPath     = flag.String("ffmpeg", "/usr/local/bin/ffmpeg", "Path to ffmpeg")
+	openaiKey      = flag.String("openai-key", "", "OpenAI API key for AI-generated video summaries")
 
 	// Upload tracking
 	uploadInProgress atomic.Bool
@@ -68,6 +73,11 @@ func main() {
 	log.Printf("Segment duration: %v", segmentDuration)
 	log.Printf("Upload enabled: %v", *uploadEnabled)
 	log.Printf("Retention: %v (rolling)", *retention)
+	if *audioInput != "" {
+		log.Printf("Audio: %s", *audioInput)
+	} else {
+		log.Printf("Audio: none (video-only recordings)")
+	}
 
 	if err := os.MkdirAll(*recordingDir, 0755); err != nil {
 		log.Fatalf("Failed to create recording directory: %v", err)
@@ -212,15 +222,42 @@ func loadAllProjects(dir string) ([]*YouTubeProject, error) {
 
 // recordSegment runs FFmpeg to record a segment
 func recordSegment(outputPath string, durationSec int) error {
-	args := []string{
-		"-hide_banner",
-		"-loglevel", "warning",
-		"-i", *rtmpInput,
-		"-c:v", "copy",
-		"-t", fmt.Sprintf("%d", durationSec),
-		"-movflags", "+faststart",
-		"-y",
-		outputPath,
+	var args []string
+
+	if *audioInput != "" {
+		// Two-input mode: video from SRS + audio from camera RTSP
+		// Matches broadcast config for audio sync (same flags that work on the live stream)
+		args = []string{
+			"-hide_banner",
+			"-loglevel", "warning",
+			"-thread_queue_size", "1024",
+			"-i", *rtmpInput,
+			"-thread_queue_size", "512",
+			"-i", *audioInput,
+			"-map", "0:v:0", "-map", "1:a:0",
+			"-shortest",
+			"-fflags", "+genpts+discardcorrupt+flush_packets",
+			"-c:v", "copy",
+			"-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+			"-async", "1",
+			"-fps_mode", "cfr",
+			"-t", fmt.Sprintf("%d", durationSec),
+			"-movflags", "+faststart",
+			"-y",
+			outputPath,
+		}
+	} else {
+		// Single-input mode (video only from SRS or RTSP)
+		args = []string{
+			"-hide_banner",
+			"-loglevel", "warning",
+			"-i", *rtmpInput,
+			"-c", "copy",
+			"-t", fmt.Sprintf("%d", durationSec),
+			"-movflags", "+faststart",
+			"-y",
+			outputPath,
+		}
 	}
 
 	log.Printf("[FFMPEG] %s %s", *ffmpegPath, strings.Join(args, " "))
@@ -290,13 +327,8 @@ func uploadWorker(fileChan <-chan string, projects []*YouTubeProject) {
 
 		log.Printf("[UPLOAD] Success via %s: %s", project.Name, filepath.Base(filePath))
 
-		if *deleteAfter {
-			if err := os.Remove(filePath); err != nil {
-				log.Printf("[CLEANUP_ERROR] Failed to delete %s: %v", filePath, err)
-			} else {
-				log.Printf("[CLEANUP] Deleted: %s", filePath)
-			}
-		}
+		// Move to uploaded/ subfolder
+		moveToUploaded(filePath)
 	}
 }
 
@@ -324,15 +356,23 @@ func uploadToYouTube(project *YouTubeProject, filePath string) error {
 
 	endTime := segTime.Add(segmentDuration)
 
-	// Format times nicely for 1-hour segments
-	title := fmt.Sprintf("%s - %s %s to %s",
-		*channelTitle,
+	// Format title as date range only
+	title := fmt.Sprintf("%s %s to %s",
 		segTime.Format("Jan 2, 2006"),
 		segTime.Format("3:04 PM"),
 		endTime.Format("3:04 PM"))
 
 	// Build enriched description from event data
-	description := buildDescription(segTime, endTime)
+	eventDescription := buildDescription(segTime, endTime)
+
+	// Generate AI summary from video frames
+	aiSummary := generateVideoSummary(filePath, segTime, endTime)
+	var description string
+	if aiSummary != "" {
+		description = aiSummary + "\n\n" + eventDescription
+	} else {
+		description = eventDescription
+	}
 
 	video := &youtube.Video{
 		Snippet: &youtube.VideoSnippet{
@@ -514,6 +554,171 @@ func formatTimecode(eventTime, segStart time.Time) string {
 	return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
 }
 
+// generateVideoSummary extracts frames from the recording and sends them to GPT for a summary
+func generateVideoSummary(filePath string, segStart, segEnd time.Time) string {
+	if *openaiKey == "" {
+		return ""
+	}
+
+	frameDir := filepath.Join(os.TempDir(), "recorder_frames")
+	os.MkdirAll(frameDir, 0755)
+	defer os.RemoveAll(frameDir)
+
+	// Get video duration
+	dur := probeVideoDuration(filePath)
+	if dur <= 0 {
+		dur = 3600
+	}
+
+	// Extract 60 frames evenly distributed across the recording
+	numFrames := 60
+	interval := dur / float64(numFrames)
+	var frameFiles []string
+
+	log.Printf("[AI] Extracting %d frames from %s...", numFrames, filepath.Base(filePath))
+	for i := 0; i < numFrames; i++ {
+		offset := float64(i) * interval
+		outFile := filepath.Join(frameDir, fmt.Sprintf("frame_%03d.jpg", i))
+		cmd := exec.Command(*ffmpegPath,
+			"-hide_banner", "-loglevel", "error",
+			"-ss", fmt.Sprintf("%.0f", offset),
+			"-i", filePath,
+			"-frames:v", "1", "-q:v", "5",
+			"-vf", "scale=640:-1",
+			"-y", outFile,
+		)
+		if err := cmd.Run(); err != nil {
+			continue
+		}
+		if info, err := os.Stat(outFile); err == nil && info.Size() > 1024 {
+			frameFiles = append(frameFiles, outFile)
+		}
+	}
+
+	if len(frameFiles) == 0 {
+		log.Println("[AI] No frames extracted, skipping AI summary")
+		return ""
+	}
+	log.Printf("[AI] Extracted %d frames, sending to GPT-5.2...", len(frameFiles))
+
+	// Build GPT vision request
+	var parts []interface{}
+
+	prompt := fmt.Sprintf(
+		"These are %d frames sampled every minute from a 1-hour recording (%s to %s) "+
+			"by an AI-powered PTZ camera on the Miami River near Brickell Bridge, Miami FL. "+
+			"Write a 2-3 sentence YouTube video description summarizing what happened during this hour. "+
+			"Mention any notable boats, vessels, weather conditions, river activity, or interesting moments. "+
+			"Be specific and informative. Don't be generic.",
+		len(frameFiles),
+		segStart.Format("3:04 PM"),
+		segEnd.Format("3:04 PM"))
+
+	parts = append(parts, map[string]interface{}{
+		"type": "text",
+		"text": prompt,
+	})
+
+	for _, f := range frameFiles {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		parts = append(parts, map[string]interface{}{
+			"type": "image_url",
+			"image_url": map[string]string{
+				"url":    "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(data),
+				"detail": "low",
+			},
+		})
+	}
+
+	reqBody := map[string]interface{}{
+		"model": "gpt-5.2",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": parts},
+		},
+		"max_completion_tokens": 250,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		log.Printf("[AI] JSON marshal failed: %v", err)
+		return ""
+	}
+
+	req, _ := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+*openaiKey)
+
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		log.Printf("[AI] Request failed: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		log.Printf("[AI] Error %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+		return ""
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	json.Unmarshal(body, &result)
+
+	if len(result.Choices) > 0 {
+		summary := strings.TrimSpace(result.Choices[0].Message.Content)
+		log.Printf("[AI] Summary: %s", summary)
+		return summary
+	}
+
+	return ""
+}
+
+// probeVideoDuration gets duration in seconds without reading the whole file
+func probeVideoDuration(file string) float64 {
+	cmd := exec.Command(*ffmpegPath, "-hide_banner", "-i", file)
+	output, _ := cmd.CombinedOutput()
+
+	s := string(output)
+	re := regexp.MustCompile(`Duration: (\d+):(\d+):(\d+)`)
+	match := re.FindStringSubmatch(s)
+	if match == nil {
+		return 0
+	}
+
+	h, _ := strconv.Atoi(match[1])
+	m, _ := strconv.Atoi(match[2])
+	sec, _ := strconv.Atoi(match[3])
+	return float64(h*3600 + m*60 + sec)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// moveToUploaded moves a recording to the uploaded/ subfolder
+func moveToUploaded(filePath string) {
+	uploadedDir := filepath.Join(*recordingDir, "uploaded")
+	os.MkdirAll(uploadedDir, 0755)
+	dest := filepath.Join(uploadedDir, filepath.Base(filePath))
+	if err := os.Rename(filePath, dest); err != nil {
+		log.Printf("[MOVE_ERROR] Failed to move %s to uploaded/: %v", filepath.Base(filePath), err)
+	} else {
+		log.Printf("[UPLOADED] Moved %s to uploaded/", filepath.Base(filePath))
+	}
+}
+
 // uploadLeftovers finds and queues any .mp4 files from previous runs that weren't uploaded
 func uploadLeftovers(uploadChan chan<- string) {
 	time.Sleep(5 * time.Second) // Let the system settle
@@ -563,37 +768,43 @@ func cleanupOldRecordings() {
 
 	for {
 		cutoff := time.Now().Add(-*retention)
-		entries, err := os.ReadDir(*recordingDir)
-		if err != nil {
-			log.Printf("[CLEANUP] Cannot read recording dir: %v", err)
-			time.Sleep(15 * time.Minute)
-			continue
-		}
 
-		for _, entry := range entries {
-			info, err := entry.Info()
+		// Clean both the main recordings dir and uploaded/ subfolder
+		for _, dir := range []string{*recordingDir, filepath.Join(*recordingDir, "uploaded")} {
+			entries, err := os.ReadDir(dir)
 			if err != nil {
 				continue
 			}
 
-			name := entry.Name()
-
-			// Clean up old .mp4 recordings
-			if strings.HasSuffix(name, ".mp4") && info.ModTime().Before(cutoff) {
-				fp := filepath.Join(*recordingDir, name)
-				log.Printf("[CLEANUP] Deleting old recording: %s (%.1f GB, age: %s)",
-					name, float64(info.Size())/(1024*1024*1024),
-					time.Since(info.ModTime()).Round(time.Hour))
-				if err := os.Remove(fp); err != nil {
-					log.Printf("[CLEANUP_ERROR] %v", err)
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
 				}
-			}
 
-			// Clean up old event JSON files
-			if strings.HasPrefix(name, "events_") && strings.HasSuffix(name, ".json") && info.ModTime().Before(cutoff) {
-				fp := filepath.Join(*recordingDir, name)
-				if err := os.Remove(fp); err != nil {
-					log.Printf("[CLEANUP_ERROR] %v", err)
+				info, err := entry.Info()
+				if err != nil {
+					continue
+				}
+
+				name := entry.Name()
+
+				// Clean up old .mp4 recordings
+				if strings.HasSuffix(name, ".mp4") && info.ModTime().Before(cutoff) {
+					fp := filepath.Join(dir, name)
+					log.Printf("[CLEANUP] Deleting old recording: %s (%.1f GB, age: %s)",
+						name, float64(info.Size())/(1024*1024*1024),
+						time.Since(info.ModTime()).Round(time.Hour))
+					if err := os.Remove(fp); err != nil {
+						log.Printf("[CLEANUP_ERROR] %v", err)
+					}
+				}
+
+				// Clean up old event JSON files
+				if strings.HasPrefix(name, "events_") && strings.HasSuffix(name, ".json") && info.ModTime().Before(cutoff) {
+					fp := filepath.Join(dir, name)
+					if err := os.Remove(fp); err != nil {
+						log.Printf("[CLEANUP_ERROR] %v", err)
+					}
 				}
 			}
 		}
