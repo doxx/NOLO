@@ -82,7 +82,7 @@ var (
 
 	// show/hide sub-commands
 	validOverlays = map[string]bool{
-		"target": true, "console": true, "pip": true, "status": true,
+		"target": true, "console": true, "pip": true, "status": true, "overlay": true,
 	}
 
 	helpText = `Camera Commands:
@@ -261,7 +261,7 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 		log.Printf("[EXECUTE] Sending commands list to %s", cmd.User)
 		ch.SendChatMessage("I'm an AI camera you can control! Move: #up #down #left #right | Zoom: #zoomin #zoomout #zoomfull #zoommid | Presets: #bridge1 #bridge2 #bridge3 #river")
 		time.Sleep(1 * time.Second)
-		ch.SendChatMessage("#boats #weather #tide #schedule for info | #stay hold position | #auto release to AI | #show.target #show.pip overlays | 2 cmds/30s")
+		ch.SendChatMessage("#boats #weather #tide #schedule for info | #stay hold position | #auto release to AI | #show.overlay all AI vision | #show.target #show.pip individual overlays | 2 cmds/30s")
 		return
 
 	case "weather":
@@ -333,6 +333,18 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 	case "pause":
 		apiPath = "/ptz/stay" // Pause = stay
 
+	case "show.overlay":
+		for _, o := range []string{"target", "pip", "status", "console"} {
+			ch.callNOLO("/show/" + o)
+		}
+		log.Printf("[EXECUTE] All overlays enabled")
+		return
+	case "hide.overlay":
+		for _, o := range []string{"target", "pip", "status", "console"} {
+			ch.callNOLO("/hide/" + o)
+		}
+		log.Printf("[EXECUTE] All overlays disabled")
+		return
 	// Overlay toggles (#show.target, #hide.pip, etc.)
 	default:
 		if strings.HasPrefix(cmd.Type, "show.") {

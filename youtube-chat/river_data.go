@@ -274,7 +274,8 @@ func (rd *RiverData) fetchWeather() {
 		return
 	}
 
-	tempF := *p.Temperature.Value*9/5 + 32
+	tempC := *p.Temperature.Value
+	tempF := tempC*9/5 + 32
 	humidity := 0.0
 	if p.RelativeHumidity.Value != nil {
 		humidity = *p.RelativeHumidity.Value
@@ -284,8 +285,8 @@ func (rd *RiverData) fetchWeather() {
 		windMPH = *p.WindSpeed.Value * 0.621371
 	}
 
-	msg := fmt.Sprintf("Miami: %.0f°F, %s, %.0f%% humidity, wind %.0f mph",
-		tempF, p.TextDescription, humidity, windMPH)
+	msg := fmt.Sprintf("Miami: %.0f°F/%.0f°C, %s, %.0f%% humidity, wind %.0f mph",
+		tempF, tempC, p.TextDescription, humidity, windMPH)
 
 	rd.mu.Lock()
 	rd.weatherMsg = msg

@@ -48,6 +48,10 @@ type SpatialIntegration struct {
 	// Post-lock holdover (linger after losing locked boat before resuming scanning)
 	lastLockLoss        time.Time         // When we lost the last locked boat
 	postLockHoldover    time.Duration     // How long to linger before resuming scanning
+
+	// Sunrise park state
+	lastSunrisePark     time.Time         // Last time we sent a sunrise park command
+	wasSunriseParked    bool              // Whether we were parked last frame
 	lastLockedPosition  SpatialCoordinate // Where the locked boat was last seen
 	holdoverPositionSet bool              // Whether we've set the holdover position
 
@@ -383,7 +387,7 @@ func (si *SpatialIntegration) debugMsgVerbose(component, message string, boatID 
 }
 
 // isSunrisePark checks if the camera should be parked for sunrise viewing
-// Parks at P1110, T020, Z010 from 4:30 AM to 7:30 AM ET
+// Parks at P1120, T020, Z010 from 4:30 AM to 7:30 AM ET
 func (si *SpatialIntegration) isSunrisePark() bool {
 	loc, _ := time.LoadLocation("America/New_York")
 	now := time.Now().In(loc)
@@ -403,15 +407,29 @@ func (si *SpatialIntegration) UpdateTracking(detections []image.Rectangle, class
 
 	// SUNRISE PARK: During sunrise hours, park camera at a scenic position and skip all tracking
 	if si.isSunrisePark() {
-		if si.frameCount%900 == 1 { // Log once every 30 seconds
-			si.debugMsg("SUNRISE", "Camera parked for sunrise viewing (4:30-7:30 AM)")
+		// On first entry or every 60 seconds, force park command (bypasses external control)
+		if !si.wasSunriseParked || time.Since(si.lastSunrisePark) > 60*time.Second {
+			pan, tilt, zoom := 1120.0, 20.0, 10.0
+			cmd := ptz.PTZCommand{
+				Command:      "absolutePosition",
+				Reason:       "SUNRISE_PARK (forced)",
+				Duration:     2 * time.Second,
+				AbsolutePan:  &pan,
+				AbsoluteTilt: &tilt,
+				AbsoluteZoom: &zoom,
+			}
+			si.cameraStateManager.ForceCommand(cmd)
+			si.lastSunrisePark = time.Now()
+			if !si.wasSunriseParked {
+				fmt.Printf("[%s][SUNRISE] Camera parked for sunrise viewing (4:30-7:30 AM)\n", time.Now().Format("15:04:05"))
+			}
 		}
-		// Send park command once per minute to hold position
-		if si.frameCount%1800 == 1 {
-			sunriseTarget := SpatialCoordinate{Pan: 1110, Tilt: 20, Zoom: 10}
-			si.executePTZMovement(sunriseTarget, "SUNRISE_PARK")
-		}
+		si.wasSunriseParked = true
 		return // Skip all tracking
+	}
+	if si.wasSunriseParked {
+		fmt.Printf("[%s][SUNRISE] Sunrise park ended - resuming AI tracking\n", time.Now().Format("15:04:05"))
+		si.wasSunriseParked = false
 	}
 
 	// Clean up stale data when camera moves

@@ -280,6 +280,14 @@ func (csm *CameraStateManager) SendManualCommand(cmd PTZCommand) bool {
 }
 
 // SendCommand sends a PTZ command with rate limiting
+// ForceCommand bypasses manual override and external control checks.
+func (csm *CameraStateManager) ForceCommand(cmd PTZCommand) bool {
+	csm.mutex.Lock()
+	csm.externalTakeover = false
+	csm.manualOverrideUntil = time.Time{}
+	csm.mutex.Unlock()
+	return csm.sendCommandInternal(cmd)
+}
 func (csm *CameraStateManager) SendCommand(cmd PTZCommand) bool {
 	// Check manual override - block AI commands while chat/API is controlling
 	if csm.IsManualOverrideActive() {
