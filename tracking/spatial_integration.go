@@ -48,6 +48,10 @@ type SpatialIntegration struct {
 	// Post-lock holdover (linger after losing locked boat before resuming scanning)
 	lastLockLoss        time.Time         // When we lost the last locked boat
 	postLockHoldover    time.Duration     // How long to linger before resuming scanning
+
+	// Sunrise park state
+	lastSunrisePark     time.Time         // Last time we sent a sunrise park command
+	wasSunriseParked    bool              // Whether we were parked last frame
 	lastLockedPosition  SpatialCoordinate // Where the locked boat was last seen
 	holdoverPositionSet bool              // Whether we've set the holdover position
 
@@ -187,6 +191,8 @@ type RecoveryData struct {
 	LastKnownSpatialPos  SpatialCoordinate // Last spatial position
 	AverageDirection     float64           // From DirectionHistory (radians)
 	AverageSpeedPixelSec float64           // From SpeedHistory
+	PTZVelocityPan       float64           // PTZ pan units per second at time of loss
+	PTZVelocityTilt      float64           // PTZ tilt units per second at time of loss
 	LossTime             time.Time         // When boat was lost
 	OriginalZoom         float64           // Zoom level when lost
 	CurrentPhase         RecoveryPhase     // Current recovery phase
@@ -204,6 +210,7 @@ type TrackedBoat struct {
 	Confidence     float64
 	FirstDetected  time.Time
 	LastSeen       time.Time
+	LastP1Seen     time.Time // Last time an actual boat-class (P1) detection fed this object
 	DetectionCount int
 	LostFrames     int // Track how many frames since last detection
 
@@ -267,10 +274,10 @@ func NewSpatialIntegration(ptzCtrl ptz.Controller, frameWidth, frameHeight int, 
 		frameCount:           0,
 
 		// Post-lock holdover settings (REMOVED: will be replaced by RECOVERY mode)
-		postLockHoldover: 15 * time.Second, // Linger for 15 seconds after losing locked boat (was 10s)
+		postLockHoldover: 5 * time.Second, // v8n: short holdover, fast re-detect (was 15s)
 
 		// RECOVERY mode settings
-		recoveryTimeout: 30 * time.Second, // Maximum 30 seconds in recovery mode
+		recoveryTimeout: 8 * time.Second, // v8n: quick recovery, don't stare at water (was 30s)
 
 		// Dynamic tracking priority configuration
 		p1TrackList:     p1TrackList,
@@ -289,7 +296,7 @@ func NewSpatialIntegration(ptzCtrl ptz.Controller, frameWidth, frameHeight int, 
 
 	// Latency compensation and fallback triggers
 	integration.pipelineLatency = 2.0         // Compensate for 2-second YOLO pipeline latency
-	integration.centerTriggerThreshold = 0.01 // 1% off-center trigger (reduced from 5% for faster response)
+	integration.centerTriggerThreshold = 0.05 // 5% off-center dead zone — reduces jerkiness by cutting PTZ commands in half
 
 	integration.debugMsg("SPATIAL_INIT", fmt.Sprintf("🔧 Lock criteria initialized: minDetections=%d, minConfidence=0.30 (LIGHTNING-FAST tracking)",
 		integration.minDetectionsForLock))
@@ -379,6 +386,17 @@ func (si *SpatialIntegration) debugMsgVerbose(component, message string, boatID 
 	}
 }
 
+// isSunrisePark checks if the camera should be parked for sunrise viewing
+// Parks at P1120, T020, Z010 from 4:30 AM to 7:30 AM ET
+func (si *SpatialIntegration) isSunrisePark() bool {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Now().In(loc)
+	hour := now.Hour()
+	minute := now.Minute()
+	minuteOfDay := hour*60 + minute
+	return minuteOfDay >= 4*60+30 && minuteOfDay < 7*60+30 // 4:30 AM to 7:30 AM
+}
+
 // UpdateTracking - THE MAIN MULTI-OBJECT TRACKING FUNCTION
 func (si *SpatialIntegration) UpdateTracking(detections []image.Rectangle, classNames []string, confidences []float64, frameData []byte) {
 	// RACE CONDITION FIX: Protect the main tracking loop from concurrent access
@@ -386,6 +404,33 @@ func (si *SpatialIntegration) UpdateTracking(detections []image.Rectangle, class
 	defer si.mu.Unlock()
 
 	si.frameCount++
+
+	// SUNRISE PARK: During sunrise hours, park camera at a scenic position and skip all tracking
+	if si.isSunrisePark() {
+		// On first entry or every 60 seconds, force park command (bypasses external control)
+		if !si.wasSunriseParked || time.Since(si.lastSunrisePark) > 60*time.Second {
+			pan, tilt, zoom := 1120.0, 20.0, 10.0
+			cmd := ptz.PTZCommand{
+				Command:      "absolutePosition",
+				Reason:       "SUNRISE_PARK (forced)",
+				Duration:     2 * time.Second,
+				AbsolutePan:  &pan,
+				AbsoluteTilt: &tilt,
+				AbsoluteZoom: &zoom,
+			}
+			si.cameraStateManager.ForceCommand(cmd)
+			si.lastSunrisePark = time.Now()
+			if !si.wasSunriseParked {
+				fmt.Printf("[%s][SUNRISE] Camera parked for sunrise viewing (4:30-7:30 AM)\n", time.Now().Format("15:04:05"))
+			}
+		}
+		si.wasSunriseParked = true
+		return // Skip all tracking
+	}
+	if si.wasSunriseParked {
+		fmt.Printf("[%s][SUNRISE] Sunrise park ended - resuming AI tracking\n", time.Now().Format("15:04:05"))
+		si.wasSunriseParked = false
+	}
 
 	// Clean up stale data when camera moves
 	si.detectAndCleanupCameraMovement()
@@ -937,7 +982,14 @@ func (si *SpatialIntegration) calculateP2TrackingData(boat *TrackedBoat) {
 }
 
 // shouldUseP2Targeting determines if a boat should use P2-centric targeting with enhanced fallback logic
+// NOTE: Disabled for YOLOv8n - the improved model detects people too reliably, causing the camera
+// to constantly jitter between boat center and people centroid. P2 data is still used for
+// boat prioritization (boats with people are more interesting), but camera always tracks boat center.
 func (si *SpatialIntegration) shouldUseP2Targeting(boat *TrackedBoat) bool {
+	// DISABLED: Always track boat center, never switch to people centroid
+	// v8n detects people everywhere (riverbank, bridges) which causes false P2 lock
+	return false
+
 	// Only use P2 targeting for LOCK or SUPER LOCK boats
 	if !boat.IsLocked {
 		if boat.UseP2Target {
@@ -1316,6 +1368,7 @@ func (si *SpatialIntegration) updateExistingBoat(boat *TrackedBoat, centerX, cen
 	// Reset lost frames (boat was found)
 	boat.LostFrames = 0
 	boat.LastSeen = time.Now()
+	boat.LastP1Seen = time.Now() // This is a P1 (boat-class) detection update
 	boat.DetectionCount++
 	boat.Confidence = math.Max(boat.Confidence, confidence)
 
@@ -1498,8 +1551,16 @@ func (si *SpatialIntegration) updateExistingBoat(boat *TrackedBoat, centerX, cen
 			boat.DetectionCount), boat.ID)
 	}
 
-	// Update tracking priority (boats with more detections get higher priority)
-	boat.TrackingPriority = float64(boat.DetectionCount) * boat.Confidence
+	// Update tracking priority — boats with people are much more interesting
+	basePriority := float64(boat.DetectionCount) * boat.Confidence
+	if boat.HasP2Objects && boat.P2Count > 0 {
+		// People inside boat box = confirmed real boat + great content
+		// Each person adds 50% priority bonus (1 person = 1.5x, 3 people = 2.5x)
+		peopleFactor := 1.0 + float64(boat.P2Count)*0.5
+		boat.TrackingPriority = basePriority * peopleFactor
+	} else {
+		boat.TrackingPriority = basePriority
+	}
 }
 
 // calculateBoatVelocity calculates pixel velocity for a boat using simple direct approach (like July 6th version)
@@ -1539,10 +1600,26 @@ func (si *SpatialIntegration) calculateBoatVelocity(boat *TrackedBoat) {
 	movementY := float64(endPoint.Y - startPoint.Y)
 
 	// Calculate velocity directly - NO COMPENSATION
-	boat.PixelVelocity.X = movementX / frameTimeDiff
-	boat.PixelVelocity.Y = movementY / frameTimeDiff
+	rawVelX := movementX / frameTimeDiff
+	rawVelY := movementY / frameTimeDiff
 
-	si.debugMsg("VELOCITY_CALC", fmt.Sprintf("✅ Boat %s SIMPLE velocity: (%.1f, %.1f) px/s over %.1fs (%d points)",
+	// VELOCITY CAP: Clamp to 250 px/s to filter camera-movement artifacts
+	// At high zoom (Z52+), real fast boats can reach 270 px/s in pixel space.
+	// Old 150 cap was choking fast boats. 250 still filters 2000+ camera artifacts.
+	const maxVelocity = 250.0
+	speed := math.Sqrt(rawVelX*rawVelX + rawVelY*rawVelY)
+	if speed > maxVelocity {
+		scale := maxVelocity / speed
+		boat.PixelVelocity.X = rawVelX * scale
+		boat.PixelVelocity.Y = rawVelY * scale
+		si.debugMsg("VELOCITY_CAP", fmt.Sprintf("⚠️ Boat %s velocity capped: (%.0f,%.0f) → (%.0f,%.0f) px/s (speed %.0f → %.0f)",
+			boat.ID, rawVelX, rawVelY, boat.PixelVelocity.X, boat.PixelVelocity.Y, speed, maxVelocity), boat.ID)
+	} else {
+		boat.PixelVelocity.X = rawVelX
+		boat.PixelVelocity.Y = rawVelY
+	}
+
+	si.debugMsg("VELOCITY_CALC", fmt.Sprintf("✅ Boat %s velocity: (%.1f, %.1f) px/s over %.1fs (%d points)",
 		boat.ID, boat.PixelVelocity.X, boat.PixelVelocity.Y, frameTimeDiff, historyCount), boat.ID)
 }
 
@@ -1627,8 +1704,28 @@ func (si *SpatialIntegration) updateBoatSpatialPosition(boat *TrackedBoat) {
 		si.debugMsg("SPATIAL_SAFETY", fmt.Sprintf("🛡️ Clamped tilt adjustment to: %.1f", tiltAdjustment))
 	}
 
+	// EDGE-BIAS: On early detections (1-3 frames), bias the aim point away from the edge
+	// the boat appeared on. Boats enter from edges and move toward center.
+	// Without this, we aim at where the boat IS and arrive 3s later when it's gone.
+	edgeBiasPan := 0.0
+	if boat.DetectionCount <= 3 {
+		frameThirdLeft := si.frameWidth / 3
+		frameThirdRight := si.frameWidth * 2 / 3
+		if boat.CurrentPixel.X < frameThirdLeft {
+			// Boat on left edge → probably heading right
+			edgeBiasPan = 20.0 // Bias 20 PTZ units right
+		} else if boat.CurrentPixel.X > frameThirdRight {
+			// Boat on right edge → probably heading left
+			edgeBiasPan = -20.0 // Bias 20 PTZ units left
+		}
+		if edgeBiasPan != 0 {
+			si.debugMsg("EDGE_BIAS", fmt.Sprintf("Boat at x=%d (frame %d), det %d → bias Pan %+.0f (anticipate direction)",
+				boat.CurrentPixel.X, si.frameWidth, boat.DetectionCount, edgeBiasPan), boat.ID)
+		}
+	}
+
 	// Calculate target position (where camera should move to center the boat when zoom completes)
-	targetPan := currentSpatial.Pan + panAdjustment
+	targetPan := currentSpatial.Pan + panAdjustment + edgeBiasPan
 	targetTilt := currentSpatial.Tilt + tiltAdjustment
 
 	// CRITICAL DEBUG: Show final calculation
@@ -1684,179 +1781,70 @@ func (si *SpatialIntegration) updateBoatSpatialPosition(boat *TrackedBoat) {
 		currentSpatial.Pan, currentSpatial.Tilt, currentSpatial.Zoom, targetPan, targetTilt, targetZoom), boat.ID)
 }
 
-// calculateOptimalZoom determines the best zoom level for tracking a boat using PROGRESSIVE ZOOM
+// calculateOptimalZoom determines the best zoom level for tracking a boat
 func (si *SpatialIntegration) calculateOptimalZoom(boat *TrackedBoat, currentZoom float64) float64 {
 	// Zoom constraints
 	const minZoom = 10.0  // Minimum zoom level
 	const maxZoom = 120.0 // Maximum zoom level
 
-	// === PROGRESSIVE ZOOM SYSTEM ===
-	// Start conservative, increase gradually as tracking becomes more stable
+	// === IMMEDIATE ZOOM SYSTEM (v8n) ===
+	// v8n gives high-confidence detections from frame 1.
+	// Calculate the FINAL target zoom immediately and send it.
+	// The camera hardware does smooth zoom transitions — we don't need to baby-step.
+	// Old progressive system took 7+ seconds to reach useful zoom. Now it's instant.
 	var targetZoom float64
 
-	// Stage 1: INITIAL DETECTION (1-3 detections) - Keep zoom LOW for fast movement
-	if boat.DetectionCount <= 3 {
-		targetZoom = 15.0 // Very conservative - fast camera movement
-		si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🚀 INITIAL STAGE: Boat %s (det:%d) → Conservative zoom %.1f for fast movement",
-			boat.ID, boat.DetectionCount, targetZoom), boat.ID)
+	// First frame only — hold at scan zoom while camera pans to the boat
+	if boat.DetectionCount <= 1 {
+		targetZoom = 18.0
+		si.debugMsg("ZOOM_CALC", fmt.Sprintf("🚀 ACQUIRED: Boat %s → hold Z%.0f while panning",
+			boat.ID, targetZoom), boat.ID)
 		return math.Max(minZoom, math.Min(maxZoom, targetZoom))
 	}
 
-	// Stage 2: BUILDING CONFIDENCE (4-6 detections) - Gradual increase
-	if boat.DetectionCount <= 6 {
-		baseZoom := 20.0
-		confidenceBonus := (boat.Confidence - 0.3) * 15.0 // Up to +15 for high confidence
-		targetZoom = baseZoom + confidenceBonus
+	// From frame 2+: calculate final zoom target and send it immediately
+	// Base zoom from confidence (v8n gives 0.45-0.92 for real boats)
+	confidenceFactor := math.Min((boat.Confidence-0.3)/0.4, 1.0) // 0-1 scale
+	targetZoom = 40.0 + (confidenceFactor * 25.0)                // 40-65 base from confidence alone
 
-		si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("📈 BUILDING STAGE: Boat %s (det:%d, conf:%.2f) → Base %.1f + Conf bonus %.1f = %.1f",
-			boat.ID, boat.DetectionCount, boat.Confidence, baseZoom, confidenceBonus, targetZoom), boat.ID)
-		return math.Max(minZoom, math.Min(maxZoom, targetZoom))
+	// Velocity adjustment — fast boats need slightly less zoom to stay in frame
+	velocity := math.Sqrt(boat.PixelVelocity.X*boat.PixelVelocity.X + boat.PixelVelocity.Y*boat.PixelVelocity.Y)
+	if velocity > 80.0 {
+		targetZoom *= 0.8 // Fast boat — pull back a bit
+	} else if velocity < 10.0 {
+		targetZoom *= 1.1 // Stationary/slow — push in
 	}
 
-	// Stage 3: LOCKED TRACKING (7-23 detections) - More aggressive zoom based on stability
-	if boat.DetectionCount <= 23 { // Changed from 11 to 23 to accommodate 24+ for SUPER LOCK
-		baseZoom := 25.0
-
-		if boat.IsLocked {
-			// Locked boat - calculate stability-based zoom
-			stabilityFactor := math.Min(float64(boat.DetectionCount)/15.0, 1.0) // 0-1 based on detection count
-			confidenceFactor := math.Min((boat.Confidence-0.3)/0.2, 1.0)        // 0-1 based on confidence (50% for full bonus)
-
-			// Calculate distance from center for centering bonus
-			centerX := float64(si.frameCenterX)
-			centerY := float64(si.frameCenterY)
-			deltaX := math.Abs(float64(boat.CurrentPixel.X) - centerX)
-			deltaY := math.Abs(float64(boat.CurrentPixel.Y) - centerY)
-			distanceFromCenter := math.Sqrt(deltaX*deltaX + deltaY*deltaY)
-			maxDistance := math.Sqrt(centerX*centerX + centerY*centerY)
-			centeringFactor := 1.0 - (distanceFromCenter / maxDistance) // 1.0 = centered, 0.0 = edge
-
-			// Calculate velocity factor (stationary boats get more zoom)
-			velocity := math.Sqrt(boat.PixelVelocity.X*boat.PixelVelocity.X + boat.PixelVelocity.Y*boat.PixelVelocity.Y)
-			velocityFactor := 1.0
-			if velocity > 20.0 {
-				velocityFactor = 0.7 // Reduce zoom for fast moving boats
-			} else if velocity < 5.0 {
-				velocityFactor = 1.3 // Increase zoom for stationary boats
-			}
-
-			// Progressive zoom formula: Start at 25, build up to 60 based on stability
-			stabilityZoom := 25.0 + (stabilityFactor * 25.0) // 25-50 based on detection count
-			confidenceBonus := confidenceFactor * 15.0       // +0-15 based on confidence
-			centeringBonus := centeringFactor * 10.0         // +0-10 based on centering
-
-			targetZoom = stabilityZoom + confidenceBonus + centeringBonus
-			targetZoom *= velocityFactor
-
-			// Person detection bonus (people deserve more zoom!)
-			if boat.HasP2Objects {
-				personBonus := 10.0 + (float64(boat.P2Count) * 3.0) // +10-16 for people
-				targetZoom += personBonus
-				si.debugMsg("ZOOM_PERSON", fmt.Sprintf("👤 Boat %s has %d people - adding +%.1f zoom bonus",
-					boat.ID, boat.P2Count, personBonus), boat.ID)
-			}
-
-			si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🔒 LOCKED STAGE: Boat %s (det:%d, conf:%.2f, centered:%.1f%%, vel:%.1f)",
-				boat.ID, boat.DetectionCount, boat.Confidence, centeringFactor*100, velocity), boat.ID)
-			si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🔒 Stability:%.1f + Confidence:%.1f + Centering:%.1f × Velocity:%.1f = %.1f",
-				stabilityZoom, confidenceBonus, centeringBonus, velocityFactor, targetZoom), boat.ID)
-		} else {
-			// Unlocked boat - conservative zoom
-			targetZoom = baseZoom + (boat.Confidence * 10.0) // 25-35 range
-			si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🔓 UNLOCKED STAGE: Boat %s (det:%d, conf:%.2f) → Base %.1f + Conf %.1f = %.1f",
-				boat.ID, boat.DetectionCount, boat.Confidence, baseZoom, boat.Confidence*10.0, targetZoom), boat.ID)
+	// PEOPLE-BASED ZOOM: The primary zoom driver with v8n
+	if boat.HasP2Objects && boat.P2Count > 0 {
+		switch {
+		case boat.P2Count >= 3:
+			targetZoom = math.Max(targetZoom, 100.0) // Party boat! Deep zoom
+		case boat.P2Count == 2:
+			targetZoom = math.Max(targetZoom, 85.0) // Multiple people
+		default:
+			targetZoom = math.Max(targetZoom, 70.0) // Single person
 		}
+		si.debugMsg("ZOOM_PEOPLE", fmt.Sprintf("👤 Boat %s: %d people → target Z%.0f",
+			boat.ID, boat.P2Count, targetZoom), boat.ID)
 	} else {
-		// Stage 4: SUPER LOCK MEGA ZOOM (24+ detections) - Maximum optical zoom for sustained tracking
-		baseZoom := 50.0
-
-		if boat.IsLocked {
-			// SUPER LOCK - MEGA ZOOM calculations (much more aggressive for 24+ frames)
-			stabilityFactor := math.Min(float64(boat.DetectionCount)/20.0, 1.0) // 0-1 based on detection count (peak at 20)
-			confidenceFactor := math.Min((boat.Confidence-0.3)/0.2, 1.0)        // 0-1 based on confidence
-
-			// Calculate distance from center for centering bonus
-			centerX := float64(si.frameCenterX)
-			centerY := float64(si.frameCenterY)
-			deltaX := math.Abs(float64(boat.CurrentPixel.X) - centerX)
-			deltaY := math.Abs(float64(boat.CurrentPixel.Y) - centerY)
-			distanceFromCenter := math.Sqrt(deltaX*deltaX + deltaY*deltaY)
-			maxDistance := math.Sqrt(centerX*centerX + centerY*centerY)
-			centeringFactor := 1.0 - (distanceFromCenter / maxDistance) // 1.0 = centered, 0.0 = edge
-
-			// Calculate velocity factor (stationary boats get more zoom)
-			velocity := math.Sqrt(boat.PixelVelocity.X*boat.PixelVelocity.X + boat.PixelVelocity.Y*boat.PixelVelocity.Y)
-			velocityFactor := 1.0
-			if velocity > 15.0 {
-				velocityFactor = 0.8 // Slightly reduce zoom for fast moving boats
-			} else if velocity < 3.0 {
-				velocityFactor = 1.2 // Increase for stationary boats (reduced from 1.4 to prevent over-zoom)
-			}
-
-			// AGGRESSIVE MEGA ZOOM formula: Start at 70, build up to 120 based on stability
-			megaZoom := 70.0 + (stabilityFactor * 40.0) // 70-110 based on detection count (more aggressive base)
-			confidenceBonus := confidenceFactor * 15.0  // +0-15 based on confidence
-			centeringBonus := centeringFactor * 10.0    // +0-10 based on centering
-
-			targetZoom = megaZoom + confidenceBonus + centeringBonus
-			targetZoom *= velocityFactor
-
-			// ENHANCED PEOPLE-CENTRIC ZOOM: Optimize for people framing when using P2 targeting
-			if boat.UseP2Target {
-				// Calculate optimal zoom based on people spread for precise framing
-				peopleOptimalZoom := si.calculateP2OptimalZoom(boat, targetZoom)
-				targetZoom = peopleOptimalZoom
-
-				si.debugMsg("PEOPLE_ZOOM", fmt.Sprintf("🎯👤 Using P2-centric zoom optimization: spread=%.1fpx → zoom=%.1f",
-					boat.P2Spread, targetZoom), boat.ID)
-			} else if boat.HasP2Objects {
-				// Standard person bonus when not using P2-centric targeting
-				megaPersonBonus := 15.0 + (float64(boat.P2Count) * 5.0) // +15-25 for people (reduced to prevent over-zoom)
-				targetZoom += megaPersonBonus
-				si.debugMsg("MEGA_ZOOM_PERSON", fmt.Sprintf("👤🔍 SUPER LOCK boat %s has %d people - adding +%.1f MEGA zoom bonus",
-					boat.ID, boat.P2Count, megaPersonBonus), boat.ID)
-			}
-
-			si.debugMsg("MEGA_ZOOM", fmt.Sprintf("🚀💎 SUPER LOCK STAGE: Boat %s (det:%d, conf:%.2f, centered:%.1f%%, vel:%.1f)",
-				boat.ID, boat.DetectionCount, boat.Confidence, centeringFactor*100, velocity), boat.ID)
-			si.debugMsg("MEGA_ZOOM", fmt.Sprintf("🚀💎 MegaBase:%.1f + Confidence:%.1f + Centering:%.1f × Velocity:%.1f = %.1f",
-				megaZoom, confidenceBonus, centeringBonus, velocityFactor, targetZoom), boat.ID)
-		} else {
-			// Even unlocked 24+ detection boats get enhanced zoom
-			targetZoom = baseZoom + (boat.Confidence * 15.0) // 50-65 range
-			si.debugMsg("ZOOM_PROGRESSIVE", fmt.Sprintf("🔓💎 SUPER LOCK UNLOCKED: Boat %s (det:%d, conf:%.2f) → Base %.1f + Conf %.1f = %.1f",
-				boat.ID, boat.DetectionCount, boat.Confidence, baseZoom, boat.Confidence*15.0, targetZoom), boat.ID)
+		// No people — cap at 60 (still useful, prevents false positive deep zoom)
+		if targetZoom > 60.0 {
+			targetZoom = 60.0
 		}
 	}
 
-	// Apply zoom change limits to prevent huge jumps - REDUCED for better lag handling
-	var maxZoomChange float64
-	if boat.DetectionCount <= 3 {
-		maxZoomChange = 5.0 // Very conservative changes for new boats
-	} else if boat.DetectionCount <= 6 {
-		maxZoomChange = 5.0 // Reduced from 15.0 - more conservative for building boats
-	} else if boat.DetectionCount >= 24 && boat.IsLocked { // SUPER LOCK: 24+ frames for MEGA ZOOM changes
-		maxZoomChange = 25.0 // MEGA ZOOM changes for SUPER LOCK boats (unchanged)
-	} else if boat.IsLocked {
-		maxZoomChange = 15.0 // Reduced from 25.0 - less aggressive for locked boats
-	} else {
-		maxZoomChange = 15.0 // Standard changes for unlocked boats
-	}
+	si.debugMsg("ZOOM_CALC", fmt.Sprintf("🔍 Boat %s: conf=%.2f vel=%.0f people=%d → Z%.0f",
+		boat.ID, boat.Confidence, velocity, boat.P2Count, targetZoom), boat.ID)
 
-	// Apply zoom change limit
-	zoomChange := targetZoom - currentZoom
-	if math.Abs(zoomChange) > maxZoomChange {
-		if zoomChange > 0 {
-			targetZoom = currentZoom + maxZoomChange
-		} else {
-			targetZoom = currentZoom - maxZoomChange
-		}
-		si.debugMsg("ZOOM_LIMIT", fmt.Sprintf("Limited zoom change from %.1f to %.1f (max change: %.1f)",
-			zoomChange, targetZoom-currentZoom, maxZoomChange), boat.ID)
-	}
-
-	// Apply hard constraints
+	// Clamp and return
 	targetZoom = math.Max(minZoom, math.Min(maxZoom, targetZoom))
+
+	// Return the calculated zoom — no more progressive stages needed
+	// The target is already the final zoom level including people bonus
+	return targetZoom
+
+	// No legacy code — zoom is calculated above and returned immediately
 
 	// Final debug output
 	si.debugMsg("ZOOM_FINAL", fmt.Sprintf("Boat %s: Current=%.1f → Target=%.1f (change: %.1f, stage: %s)",
@@ -2006,6 +1994,7 @@ func (si *SpatialIntegration) createNewTrackedObject(centerX, centerY int, area,
 		Confidence:       confidence,
 		FirstDetected:    now,
 		LastSeen:         now,
+		LastP1Seen:       now, // Created from a P1 detection
 		DetectionCount:   1,
 		LostFrames:       0,
 		CurrentPixel:     image.Point{X: centerX, Y: centerY},
@@ -2035,16 +2024,19 @@ func (si *SpatialIntegration) cleanupLostBoats() {
 	var removedBoats []string
 
 	for id, boat := range si.allBoats {
-		// 🔥 P2-BASED LOCK MAINTENANCE - Use people detection to maintain locks even when P1 is lost!
-		if boat.LostFrames > 0 && (boat.IsLocked || boat.LockStrength > 0.8) && boat.HasP2Objects {
-			// P1 lost but P2 active - MAINTAIN LOCK using P2 data
-			boat.LostFrames = 0 // Reset - we're not really "lost"
-			boat.LastSeen = time.Now()
-			boat.UseP2Target = true // Target the people, not the boat center
+		// P2 LOCK MAINTENANCE DISABLED for v8n
+		// v8n detects people everywhere (riverwalk, benches, park). Using people to
+		// maintain a "boat" lock causes the camera to zoom into pedestrians when
+		// the original boat detection was actually a seawall false positive.
+		// A boat must have ongoing P1 (boat-class) detections to stay locked.
 
-			si.debugMsg("P2_LOCK_MAINTENANCE", fmt.Sprintf("🔒👤 LOCK maintained via P2! P1 lost but %d people detected - targeting P2 centroid (%.2f quality)",
-				boat.P2Count, boat.P2Quality), boat.ID)
-			continue // Skip removal check since we're maintaining lock via P2
+		// P1 STALENESS CHECK: If no actual boat-class detection for 2 seconds, drop lock
+		// This prevents people/seawall from keeping a ghost "boat" alive
+		if boat.IsLocked && !boat.LastP1Seen.IsZero() && time.Since(boat.LastP1Seen) > 5*time.Second {
+			si.debugMsg("P1_STALE_UNLOCK", fmt.Sprintf("🔓 Boat %s unlocked: no P1 (boat-class) detection for %.1fs — likely false positive",
+				boat.ID, time.Since(boat.LastP1Seen).Seconds()), boat.ID)
+			boat.IsLocked = false
+			boat.LockStrength = 0
 		}
 
 		if boat.LostFrames > si.maxLostFrames {
@@ -2404,22 +2396,50 @@ func (si *SpatialIntegration) selectTargetBoat() {
 		si.targetBoat = bestBoat
 		si.lastTargetSwitch = si.frameCount
 
-		// DETAILED LOCK CRITERIA CHECK
+		// DETAILED LOCK CRITERIA CHECK (v8n-aware: people validate boats)
 		meetsDetectionCriteria := bestBoat.DetectionCount >= si.minDetectionsForLock
 		meetsConfidenceCriteria := bestBoat.Confidence > 0.30
+		hasPeopleInside := bestBoat.HasP2Objects && bestBoat.P2Count > 0
 
-		si.debugMsg("LOCK_CHECK", fmt.Sprintf("🔍 Boat %s lock criteria: detections=%d≥%d?%v, confidence=%.3f>0.30?%v",
+		// PEOPLE-VALIDATES-BOAT: Boats with people get fast-tracked to lock
+		// Boats WITHOUT people AND without movement are likely false positives (river edge, building)
+		velocity := math.Sqrt(bestBoat.PixelVelocity.X*bestBoat.PixelVelocity.X + bestBoat.PixelVelocity.Y*bestBoat.PixelVelocity.Y)
+		isMoving := velocity > 5.0
+		isStationary := !isMoving && bestBoat.DetectionCount > 10 // Stationary for 10+ frames
+
+		// Require movement OR people for locking — stationary objects with no people are false positives
+		meetsValidationCriteria := hasPeopleInside || isMoving || bestBoat.DetectionCount <= 5 // Give new detections a chance
+
+		// If boat has people, reduce detection requirement (instant confidence)
+		if hasPeopleInside && bestBoat.P2Count >= 2 {
+			meetsDetectionCriteria = bestBoat.DetectionCount >= 1 // 2+ people = lock immediately
+		} else if hasPeopleInside {
+			meetsDetectionCriteria = meetsDetectionCriteria || bestBoat.DetectionCount >= 1 // 1 person = still fast
+		}
+
+		// Stationary + no people after 10 frames = reject lock
+		if isStationary && !hasPeopleInside {
+			meetsValidationCriteria = false
+			si.debugMsg("LOCK_REJECT", fmt.Sprintf("🚫 Boat %s rejected: stationary (vel=%.1f) + no people after %d frames — likely false positive",
+				bestBoat.ID, velocity, bestBoat.DetectionCount), bestBoat.ID)
+		}
+
+		si.debugMsg("LOCK_CHECK", fmt.Sprintf("🔍 Boat %s lock: det=%d≥%d?%v, conf=%.2f>0.30?%v, people=%d, moving=%v, valid=%v",
 			bestBoat.ID, bestBoat.DetectionCount, si.minDetectionsForLock, meetsDetectionCriteria,
-			bestBoat.Confidence, meetsConfidenceCriteria), bestBoat.ID)
+			bestBoat.Confidence, meetsConfidenceCriteria, bestBoat.P2Count, isMoving, meetsValidationCriteria), bestBoat.ID)
 
-		// FIXED: Only lock with mature targets (24+ detections + confidence), no early lock
-		if meetsDetectionCriteria && meetsConfidenceCriteria {
+		// Lock only if all criteria met INCLUDING validation
+		if meetsDetectionCriteria && meetsConfidenceCriteria && meetsValidationCriteria {
 			wasAlreadyLocked := si.targetBoat.IsLocked
 			si.targetBoat.IsLocked = true
 
 			if !wasAlreadyLocked {
 				si.targetBoat.LockStrength = math.Min(1.0, si.targetBoat.LockStrength+0.1)
-				si.debugMsg("LOCK_CAMERA", fmt.Sprintf("🔒 Target boat %s LOCKED for camera tracking (mature target for SUPER LOCK)!", si.targetBoat.ID), si.targetBoat.ID)
+				lockReason := "standard"
+				if hasPeopleInside {
+					lockReason = fmt.Sprintf("people-confirmed (%d people)", bestBoat.P2Count)
+				}
+				si.debugMsg("LOCK_CAMERA", fmt.Sprintf("🔒 Target boat %s LOCKED (%s)!", si.targetBoat.ID, lockReason), si.targetBoat.ID)
 			} else {
 				si.targetBoat.LockStrength = math.Min(1.0, si.targetBoat.LockStrength+0.05)
 				si.debugMsg("LOCK_CAMERA", fmt.Sprintf("🔒 Target boat %s just became locked in camera tracking!", si.targetBoat.ID), si.targetBoat.ID)
@@ -3641,10 +3661,41 @@ func (si *SpatialIntegration) smartPTZTracking() {
 		return
 	}
 
-	// Skip tracking if boat is lost (let predictive mode handle it)
+	// COAST TRACKING: When boat is lost, keep panning in the direction it was moving
+	// Like a cameraman tracking a runner behind a pole — don't stop, keep the same speed
 	if si.targetBoat.LostFrames > 0 {
-		si.debugMsg("PTZ_TRACK", fmt.Sprintf("Boat lost for %d frames - holding position",
-			si.targetBoat.LostFrames), si.targetBoat.ID)
+		velX := si.targetBoat.PixelVelocity.X
+		velY := si.targetBoat.PixelVelocity.Y
+		speed := math.Sqrt(velX*velX + velY*velY)
+
+		if speed > 5.0 && si.targetBoat.CurrentSpatial.Pan > 0 {
+			// Convert last known pixel velocity to PTZ velocity
+			currentZoom := si.ptzCtrl.GetCurrentPosition().Zoom
+			panPPU := si.spatialTracker.InterpolatePanCalibration(currentZoom)
+			tiltPPU := si.spatialTracker.InterpolateTiltCalibration(currentZoom)
+			ptzVelPan := velX / panPPU
+			ptzVelTilt := velY / tiltPPU
+
+			// Extrapolate: move camera to where boat should be NOW
+			lostSeconds := float64(si.targetBoat.LostFrames) / 30.0 // frames to seconds
+			currentPos := si.ptzCtrl.GetCurrentPosition()
+			coastTarget := SpatialCoordinate{
+				Pan:  currentPos.Pan + (ptzVelPan * 0.5), // Move half a second ahead each update
+				Tilt: currentPos.Tilt + (ptzVelTilt * 0.5),
+				Zoom: currentPos.Zoom, // Hold zoom while coasting
+			}
+
+			fmt.Printf("[%s][COAST_TRACK] Lost %d frames (%.1fs) — coasting PTZ vel(%.1f,%.1f)/s → Pan %.0f→%.0f [%s]\n",
+				time.Now().Format("15:04:05.000"),
+				si.targetBoat.LostFrames, lostSeconds,
+				ptzVelPan, ptzVelTilt,
+				currentPos.Pan, coastTarget.Pan, si.targetBoat.ID)
+
+			si.executePTZMovement(coastTarget, "COAST_TRACK")
+		} else {
+			si.debugMsg("PTZ_TRACK", fmt.Sprintf("Boat lost %d frames, no velocity — holding position",
+				si.targetBoat.LostFrames), si.targetBoat.ID)
+		}
 		return
 	}
 
@@ -3666,112 +3717,78 @@ func (si *SpatialIntegration) smartPTZTracking() {
 		trackingMode = "BOAT_CENTER"
 	}
 
-	// Store original position for debug logging
-	origTargetX := trackingTargetX
-	origTargetY := trackingTargetY
+	// === PTZ-SPACE LEAD TRACKING ===
+	// Convert pixel velocity to PTZ velocity using calibration data, then apply lead in PTZ space.
+	// This is zoom-independent: a boat moving at 5 PTZ pan units/sec is 5 PTZ pan units/sec
+	// whether zoomed at Z10 or Z120.
 
-	// Apply velocity-based lead to compensate for camera/pipeline latency
+	// Get pixel velocity
 	velX := si.targetBoat.PixelVelocity.X
 	velY := si.targetBoat.PixelVelocity.Y
-	speed := math.Sqrt(velX*velX + velY*velY) // pixels/second
+	speed := math.Sqrt(velX*velX + velY*velY)
 
-	leadApplied := false
-	if speed > 5.0 { // Only lead if boat is actually moving (>5 px/s)
-		// Lead time: how far ahead to aim (seconds)
-		// Uses ptzPredictionTime config (default 2.5s)
-		leadTime := si.ptzPredictionTime
-		if leadTime <= 0 {
-			leadTime = 2.5 // Fallback default
-		}
-
-		// Project tracking target forward by lead time
-		leadX := int(velX * leadTime)
-		leadY := int(velY * leadTime)
-		trackingTargetX += leadX
-		trackingTargetY += leadY
-
-		// Composition bias: offset 10% of frame in direction of travel
-		// This keeps open water ahead of the boat (like a good cameraman)
-		compositionBiasX := 0.0
-		compositionBiasY := 0.0
-		if math.Abs(velX) > math.Abs(velY) {
-			// Primarily horizontal movement
-			if velX > 0 {
-				compositionBiasX = float64(si.frameWidth) * 0.08
-			} else {
-				compositionBiasX = float64(si.frameWidth) * -0.08
-			}
-		} else if math.Abs(velY) > 5.0 {
-			// Primarily vertical movement
-			if velY > 0 {
-				compositionBiasY = float64(si.frameHeight) * 0.08
-			} else {
-				compositionBiasY = float64(si.frameHeight) * -0.08
-			}
-		}
-		trackingTargetX += int(compositionBiasX)
-		trackingTargetY += int(compositionBiasY)
-
-		// Clamp to frame bounds
-		trackingTargetX = int(math.Max(0, math.Min(float64(si.frameWidth), float64(trackingTargetX))))
-		trackingTargetY = int(math.Max(0, math.Min(float64(si.frameHeight), float64(trackingTargetY))))
-
-		leadApplied = true
-		// Always log lead tracking (bypasses debug flag)
-		fmt.Printf("[%s][LEAD_TRACK] Vel:(%.0f,%.0f) speed=%.0f | Lead:%.1fs (+%d,+%d px) | Bias:(+%.0f,+%.0f) | (%d,%d)->(%d,%d) [%s]\n",
-			time.Now().Format("15:04:05.000"),
-			velX, velY, speed, leadTime, leadX, leadY, compositionBiasX, compositionBiasY,
-			origTargetX, origTargetY, trackingTargetX, trackingTargetY, si.targetBoat.ID)
-		si.debugMsg("LEAD_TRACK", fmt.Sprintf("Velocity: (%.0f,%.0f) px/s, speed=%.0f | Lead: %.1fs ahead (+%d,+%d px) | Target: (%d,%d)->(%d,%d)",
-			velX, velY, speed, leadTime, leadX, leadY,
-			origTargetX, origTargetY, trackingTargetX, trackingTargetY), si.targetBoat.ID)
-	} else {
-		si.debugMsg("LEAD_TRACK", fmt.Sprintf("Speed %.1f px/s (below threshold) - no lead applied, tracking at (%d,%d)",
-			speed, trackingTargetX, trackingTargetY), si.targetBoat.ID)
-	}
-
-	_ = leadApplied // Avoid unused variable warning
-
-	// Calculate how far tracking target is from center in pixels
+	// Calculate how far boat is from center (for triggering movement)
 	offsetX := trackingTargetX - si.frameCenterX
 	offsetY := trackingTargetY - si.frameCenterY
-
-	// Calculate distance from center as percentage
 	distanceFromCenterX := math.Abs(float64(offsetX)) / float64(si.frameWidth)
 	distanceFromCenterY := math.Abs(float64(offsetY)) / float64(si.frameHeight)
 	maxDistanceFromCenter := math.Max(distanceFromCenterX, distanceFromCenterY)
 
 	// Trigger movement if target is more than 1% off-center
 	if maxDistanceFromCenter > si.centerTriggerThreshold {
-		leadInfo := ""
+		// Get boat's current PTZ spatial position (where the camera sees it now)
+		if si.targetBoat.CurrentSpatial.Pan == 0.0 && si.targetBoat.CurrentSpatial.Tilt == 0.0 {
+			si.updateBoatSpatialPosition(si.targetBoat)
+			return
+		}
+		target := si.targetBoat.CurrentSpatial
+
+		// Apply lead in PTZ space using calibration
 		if speed > 5.0 {
-			leadInfo = fmt.Sprintf(" [LEAD: %.0fpx/s, %.1fs ahead]", speed, si.ptzPredictionTime)
-		}
-		si.debugMsg("SIMPLE_TRACK", fmt.Sprintf("%s %.1f%% off-center (>%.1f%%) - moving%s",
-			trackingMode, maxDistanceFromCenter*100, si.centerTriggerThreshold*100, leadInfo), si.targetBoat.ID)
-
-		// Calculate spatial coordinates for the tracking target
-		var target SpatialCoordinate
-
-		if si.targetBoat.UseP2Target {
-			// Calculate spatial coordinates for P2 centroid
-			target = si.calculateSpatialCoordinatesForPixel(trackingTargetX, trackingTargetY)
-			si.debugMsg("PEOPLE_TRACK", fmt.Sprintf("🎯👤 Calculated spatial target for P2 centroid: Pan=%.1f, Tilt=%.1f",
-				target.Pan, target.Tilt), si.targetBoat.ID)
-		} else {
-			// Use boat's existing spatial position
-			if si.targetBoat.CurrentSpatial.Pan == 0.0 && si.targetBoat.CurrentSpatial.Tilt == 0.0 {
-				si.debugMsg("SIMPLE_TRACK", "⚠️ Boat has invalid spatial position - forcing recalculation", si.targetBoat.ID)
-				si.updateBoatSpatialPosition(si.targetBoat)
-				return
+			leadTime := si.ptzPredictionTime
+			if leadTime <= 0 {
+				leadTime = 2.5
 			}
-			target = si.targetBoat.CurrentSpatial
+
+			// Convert pixel velocity → PTZ velocity using zoom calibration
+			currentZoom := si.ptzCtrl.GetCurrentPosition().Zoom
+			panPixelsPerUnit := si.spatialTracker.InterpolatePanCalibration(currentZoom)
+			tiltPixelsPerUnit := si.spatialTracker.InterpolateTiltCalibration(currentZoom)
+
+			ptzVelPan := velX / panPixelsPerUnit   // PTZ pan units per second
+			ptzVelTilt := velY / tiltPixelsPerUnit // PTZ tilt units per second
+
+			// Apply lead in PTZ space — this is zoom-independent
+			leadPan := ptzVelPan * leadTime
+			leadTilt := ptzVelTilt * leadTime
+
+			// Composition bias in PTZ space: offset in direction of travel
+			biasPan := 0.0
+			if math.Abs(ptzVelPan) > 0.5 {
+				if ptzVelPan > 0 {
+					biasPan = 15.0 // 15 PTZ pan units ahead
+				} else {
+					biasPan = -15.0
+				}
+			}
+
+			target.Pan += leadPan + biasPan
+			target.Tilt += leadTilt
+
+			fmt.Printf("[%s][LEAD_TRACK] PxVel:(%.0f,%.0f) → PTZVel:(%.1f,%.1f)/s @ Z%.0f | Lead:%.1fs → Pan%+.0f Tilt%+.0f | Target:PTZ(%.0f,%.0f) [%s]\n",
+				time.Now().Format("15:04:05.000"),
+				velX, velY, ptzVelPan, ptzVelTilt, currentZoom,
+				leadTime, leadPan+biasPan, leadTilt,
+				target.Pan, target.Tilt, si.targetBoat.ID)
 		}
 
-		// Move camera to the calculated target (P2 centroid or boat center)
+		si.debugMsg("SIMPLE_TRACK", fmt.Sprintf("%s %.1f%% off-center - moving to PTZ(%.0f,%.0f)",
+			trackingMode, maxDistanceFromCenter*100, target.Pan, target.Tilt), si.targetBoat.ID)
+
+		// Move camera to the PTZ-space lead target
 		si.executePTZMovement(target, trackingMode)
 	} else {
-		si.debugMsg("SIMPLE_TRACK", fmt.Sprintf("✅ %s centered (%.1f%% off-center) - no movement needed",
+		si.debugMsg("SIMPLE_TRACK", fmt.Sprintf("✅ %s centered (%.1f%% off-center)",
 			trackingMode, maxDistanceFromCenter*100), si.targetBoat.ID)
 	}
 }
@@ -3931,6 +3948,16 @@ func (si *SpatialIntegration) prepareRecoveryData(lostBoat *TrackedBoat) {
 		}
 	}
 
+	// Calculate PTZ velocity for recovery extrapolation
+	currentZoom := si.ptzCtrl.GetCurrentPosition().Zoom
+	panPPU := si.spatialTracker.InterpolatePanCalibration(currentZoom)
+	tiltPPU := si.spatialTracker.InterpolateTiltCalibration(currentZoom)
+	ptzVelPan := lostBoat.PixelVelocity.X / panPPU
+	ptzVelTilt := lostBoat.PixelVelocity.Y / tiltPPU
+
+	si.debugMsg("RECOVERY_PREP", fmt.Sprintf("PTZ velocity at loss: Pan=%.1f/s Tilt=%.1f/s (from pixel vel %.0f,%.0f @ Z%.0f)",
+		ptzVelPan, ptzVelTilt, lostBoat.PixelVelocity.X, lostBoat.PixelVelocity.Y, currentZoom), lostBoat.ID)
+
 	// Create recovery data
 	si.recoveryData = &RecoveryData{
 		ObjectID:             lostBoat.ID,
@@ -3938,6 +3965,8 @@ func (si *SpatialIntegration) prepareRecoveryData(lostBoat *TrackedBoat) {
 		LastKnownSpatialPos:  lostBoat.CurrentSpatial,
 		AverageDirection:     avgDirection,
 		AverageSpeedPixelSec: avgSpeed,
+		PTZVelocityPan:       ptzVelPan,
+		PTZVelocityTilt:      ptzVelTilt,
 		LossTime:             time.Now(),
 		OriginalZoom:         lostBoat.CurrentSpatial.Zoom,
 		CurrentPhase:         RECOVERY_MOVE_TO_PREDICTED_1,
@@ -4010,41 +4039,26 @@ func (si *SpatialIntegration) executePredictiveMove1() {
 	// If this is the first call for this phase, send the movement command
 	if !si.recoveryData.WaitingForArrival {
 		elapsed := time.Since(si.recoveryData.LossTime)
+		clampedElapsed := math.Min(elapsed.Seconds(), 10.0) // Cap at 10s for v8n fast recovery
 
-		// SAFETY BOUNDS: Prevent bizarre prediction figures that cause huge camera swings
+		// PTZ-SPACE EXTRAPOLATION: Use stored PTZ velocity to predict where boat is NOW
+		// This is zoom-independent and much more accurate than pixel-space prediction
+		lastPos := si.recoveryData.LastKnownSpatialPos
+		predictedSpatial := SpatialCoordinate{
+			Pan:  lastPos.Pan + (si.recoveryData.PTZVelocityPan * clampedElapsed),
+			Tilt: lastPos.Tilt + (si.recoveryData.PTZVelocityTilt * clampedElapsed),
+			Zoom: lastPos.Zoom * 0.80, // Zoom out 20% to widen search
+		}
 
-		// Clamp elapsed time (after 30 seconds, prediction becomes meaningless)
-		clampedElapsed := math.Min(elapsed.Seconds(), 30.0)
+		si.debugMsg("RECOVERY_PREDICT", fmt.Sprintf("PTZ extrapolation: (%.0f,%.0f) + %.1fs × vel(%.1f,%.1f) = (%.0f,%.0f)",
+			lastPos.Pan, lastPos.Tilt, clampedElapsed,
+			si.recoveryData.PTZVelocityPan, si.recoveryData.PTZVelocityTilt,
+			predictedSpatial.Pan, predictedSpatial.Tilt), si.recoveryData.ObjectID)
 
-		// Clamp average speed (max 300 pixels/second - a very fast boat)
-		clampedSpeed := math.Min(math.Abs(si.recoveryData.AverageSpeedPixelSec), 300.0)
-
-		// Simple 2x prediction - move twice as far as normal prediction
-		deltaX := clampedSpeed * clampedElapsed * math.Cos(si.recoveryData.AverageDirection) * 2.0
-		deltaY := clampedSpeed * clampedElapsed * math.Sin(si.recoveryData.AverageDirection) * 2.0
-
-		// Clamp pixel movement to reasonable bounds (max 1.5x frame dimensions)
-		maxPixelMovement := float64(si.frameWidth) * 1.5
-		deltaX = math.Max(-maxPixelMovement, math.Min(maxPixelMovement, deltaX))
-		deltaY = math.Max(-maxPixelMovement, math.Min(maxPixelMovement, deltaY))
-
-		// Predict new pixel position
-		predictedPixelX := si.recoveryData.LastKnownPixelPos.X + int(deltaX)
-		predictedPixelY := si.recoveryData.LastKnownPixelPos.Y + int(deltaY)
-
-		// Clamp predicted position to expanded frame bounds (allow some overshoot for edge tracking)
-		maxX := int(float64(si.frameWidth) * 1.2) // 20% overshoot allowed
-		maxY := int(float64(si.frameHeight) * 1.2)
-		predictedPixelX = int(math.Max(-float64(si.frameWidth)*0.2, math.Min(float64(maxX), float64(predictedPixelX))))
-		predictedPixelY = int(math.Max(-float64(si.frameHeight)*0.2, math.Min(float64(maxY), float64(predictedPixelY))))
-
-		// Convert to spatial coordinates
-		predictedSpatial := si.calculateSpatialCoordinatesForPixel(predictedPixelX, predictedPixelY)
-
-		// FINAL SAFETY CHECK: Clamp spatial coordinates to prevent extreme camera movements
+		// Safety clamp
 		currentPos := si.ptzCtrl.GetCurrentPosition()
-		maxPanMovement := 500.0  // Max 500 pan units per recovery move
-		maxTiltMovement := 300.0 // Max 300 tilt units per recovery move
+		maxPanMovement := 300.0  // Max 300 pan units per recovery move
+		maxTiltMovement := 200.0 // Max 200 tilt units per recovery move
 
 		// Clamp pan movement
 		if math.Abs(predictedSpatial.Pan-currentPos.Pan) > maxPanMovement {
@@ -4053,8 +4067,8 @@ func (si *SpatialIntegration) executePredictiveMove1() {
 			} else {
 				predictedSpatial.Pan = currentPos.Pan - maxPanMovement
 			}
-			si.debugMsg("RECOVERY_SAFETY", fmt.Sprintf("🚫 Clamped pan movement from %.1f to %.1f (max: %.0f units)",
-				si.calculateSpatialCoordinatesForPixel(predictedPixelX, predictedPixelY).Pan, predictedSpatial.Pan, maxPanMovement), si.recoveryData.ObjectID)
+			si.debugMsg("RECOVERY_SAFETY", fmt.Sprintf("🚫 Clamped pan to %.0f (max %.0f units from current %.0f)",
+				predictedSpatial.Pan, maxPanMovement, currentPos.Pan), si.recoveryData.ObjectID)
 		}
 
 		// Clamp tilt movement
@@ -4064,8 +4078,8 @@ func (si *SpatialIntegration) executePredictiveMove1() {
 			} else {
 				predictedSpatial.Tilt = currentPos.Tilt - maxTiltMovement
 			}
-			si.debugMsg("RECOVERY_SAFETY", fmt.Sprintf("🚫 Clamped tilt movement from %.1f to %.1f (max: %.0f units)",
-				si.calculateSpatialCoordinatesForPixel(predictedPixelX, predictedPixelY).Tilt, predictedSpatial.Tilt, maxTiltMovement), si.recoveryData.ObjectID)
+			si.debugMsg("RECOVERY_SAFETY", fmt.Sprintf("🚫 Clamped tilt to %.0f (max %.0f units from current %.0f)",
+				predictedSpatial.Tilt, maxTiltMovement, currentPos.Tilt), si.recoveryData.ObjectID)
 		}
 
 		// Store target and start waiting for arrival
@@ -4076,8 +4090,9 @@ func (si *SpatialIntegration) executePredictiveMove1() {
 		// Move camera to predicted position
 		si.executePTZMovement(predictedSpatial, "RECOVERY: Predicted position")
 
-		si.debugMsg("RECOVERY_PHASE1", fmt.Sprintf("🎯 Moving to predicted position (2x simple): elapsed=%.1fs→%.1fs, speed=%.1f→%.1f px/s, moved(%.0f,%.0f)px → spatial(%.1f,%.1f)",
-			elapsed.Seconds(), clampedElapsed, si.recoveryData.AverageSpeedPixelSec, clampedSpeed, deltaX, deltaY, predictedSpatial.Pan, predictedSpatial.Tilt), si.recoveryData.ObjectID)
+		si.debugMsg("RECOVERY_PHASE1", fmt.Sprintf("🎯 PTZ extrapolation: %.1fs elapsed, vel(%.1f,%.1f)/s → target PTZ(%.0f,%.0f,%.0f)",
+			clampedElapsed, si.recoveryData.PTZVelocityPan, si.recoveryData.PTZVelocityTilt,
+			predictedSpatial.Pan, predictedSpatial.Tilt, predictedSpatial.Zoom), si.recoveryData.ObjectID)
 	}
 
 	// Check if camera has stopped moving (simple and reliable)

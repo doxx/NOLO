@@ -48,6 +48,7 @@ type CommandHandler struct {
 	noloAPI     string // NOLO HTTP API base URL
 	service     *youtube.Service
 	liveChatID  string
+	schedule    *ScheduleManager
 	riverData   *RiverData
 }
 
@@ -74,14 +75,14 @@ var (
 		// Overlays
 		"show": true, "hide": true,
 		// Info
-		"boats": true, "weather": true, "tide": true,
+		"boats": true, "weather": true, "tide": true, "schedule": true,
 		// Help
 		"commands": true,
 	}
 
 	// show/hide sub-commands
 	validOverlays = map[string]bool{
-		"target": true, "console": true, "pip": true, "status": true,
+		"target": true, "console": true, "pip": true, "status": true, "overlay": true,
 	}
 
 	helpText = `Camera Commands:
@@ -260,7 +261,7 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 		log.Printf("[EXECUTE] Sending commands list to %s", cmd.User)
 		ch.SendChatMessage("I'm an AI camera you can control! Move: #up #down #left #right | Zoom: #zoomin #zoomout #zoomfull #zoommid | Presets: #bridge1 #bridge2 #bridge3 #river")
 		time.Sleep(1 * time.Second)
-		ch.SendChatMessage("#boats #weather #tide for info | #stay hold position | #auto release to AI | #show.target #show.pip overlays | 2 cmds/30s")
+		ch.SendChatMessage("#boats #weather #tide #schedule for info | #stay hold position | #auto release to AI | #show.overlay all AI vision | #show.target #show.pip individual overlays | 2 cmds/30s")
 		return
 
 	case "weather":
@@ -276,6 +277,23 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 	case "boats":
 		if ch.riverData != nil {
 			ch.SendChatMessage(ch.riverData.GetBoats())
+		}
+		return
+	case "schedule":
+		if ch.schedule != nil {
+			upcoming := ch.schedule.GetUpcomingEvents(120) // Next 2 hours
+			if len(upcoming) == 0 {
+				ch.SendChatMessage("No vessels scheduled in the next 2 hours. Source: Biscayne Bay Pilots")
+			} else {
+				msgs := []string{}
+				for _, e := range upcoming {
+					if len(msgs) >= 3 {
+						break // Max 3 events per request
+					}
+					msgs = append(msgs, FormatEventAnnouncement(e))
+				}
+				ch.SendChatMessage("Upcoming: " + strings.Join(msgs, " | "))
+			}
 		}
 		return
 
@@ -315,6 +333,18 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 	case "pause":
 		apiPath = "/ptz/stay" // Pause = stay
 
+	case "show.overlay":
+		for _, o := range []string{"target", "pip", "status", "console"} {
+			ch.callNOLO("/show/" + o)
+		}
+		log.Printf("[EXECUTE] All overlays enabled")
+		return
+	case "hide.overlay":
+		for _, o := range []string{"target", "pip", "status", "console"} {
+			ch.callNOLO("/hide/" + o)
+		}
+		log.Printf("[EXECUTE] All overlays disabled")
+		return
 	// Overlay toggles (#show.target, #hide.pip, etc.)
 	default:
 		if strings.HasPrefix(cmd.Type, "show.") {
@@ -772,6 +802,64 @@ func main() {
 		handler.riverData.sendChatFn = func(msg string) { handler.SendChatMessage(msg) }
 		handler.riverData.Start()
 
+		// Start port schedule announcements (bbpilots.com) — scrape mode
+		schedule := NewScheduleManager()
+		handler.schedule = schedule
+		go func() {
+			if err := schedule.FetchSchedule(); err != nil {
+				log.Printf("[SCHEDULE] Initial fetch failed: %v", err)
+			} else {
+				log.Printf("[SCHEDULE] Loaded schedule")
+				if summary := schedule.GetTodaysSummary(); summary != "" {
+					handler.SendChatMessage(summary)
+				}
+			}
+
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			sunriseAnnounced := false
+			sunriseEndAnnounced := false
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if schedule.NeedsRefresh() {
+						if err := schedule.FetchSchedule(); err != nil {
+							log.Printf("[SCHEDULE] Refresh failed: %v", err)
+						}
+					}
+
+					// Sunrise park announcement
+					loc, _ := time.LoadLocation("America/New_York")
+					now := time.Now().In(loc)
+					minuteOfDay := now.Hour()*60 + now.Minute()
+					inSunrise := minuteOfDay >= 4*60+30 && minuteOfDay < 7*60+30
+
+					if inSunrise && !sunriseAnnounced {
+						handler.SendChatMessage("Parking camera for sunrise viewing until 7:30 AM. Enjoy the view!")
+						sunriseAnnounced = true
+						sunriseEndAnnounced = false
+					} else if !inSunrise && sunriseAnnounced && !sunriseEndAnnounced {
+						handler.SendChatMessage("Sunrise viewing complete. AI boat tracking resumed!")
+						sunriseEndAnnounced = true
+						sunriseAnnounced = false
+					}
+
+					upcoming := schedule.GetUpcomingEvents(30)
+					for _, event := range upcoming {
+						if event.Type == "YACHT" {
+							msg := FormatEventAnnouncement(event)
+							handler.SendChatMessage(msg)
+							schedule.MarkAnnounced(event.Vessel, event.Time)
+							log.Printf("[SCHEDULE] Announced: %s", msg)
+							time.Sleep(2 * time.Second)
+						}
+					}
+				}
+			}
+		}()
+
 		scrapeBot.PollMessages(ctx)
 		return
 	}
@@ -819,6 +907,69 @@ func main() {
 	// Start river data feeds with chat send function
 	handler.riverData.sendChatFn = func(msg string) { handler.SendChatMessage(msg) }
 	handler.riverData.Start()
+
+	// Start port schedule announcements (bbpilots.com)
+	schedule := NewScheduleManager()
+	handler.schedule = schedule
+	go func() {
+		// Initial fetch
+		if err := schedule.FetchSchedule(); err != nil {
+			log.Printf("[SCHEDULE] Initial fetch failed: %v", err)
+		} else {
+			// Post today's summary on startup
+			if summary := schedule.GetTodaysSummary(); summary != "" {
+				handler.SendChatMessage(summary)
+			}
+		}
+
+		// Check every 5 minutes for upcoming events
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		sunriseAnnounced := false
+		sunriseEndAnnounced := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Refresh schedule if stale
+				if schedule.NeedsRefresh() {
+					if err := schedule.FetchSchedule(); err != nil {
+						log.Printf("[SCHEDULE] Refresh failed: %v", err)
+					}
+				}
+
+				// Sunrise park announcement
+				loc, _ := time.LoadLocation("America/New_York")
+				now := time.Now().In(loc)
+				minuteOfDay := now.Hour()*60 + now.Minute()
+				inSunrise := minuteOfDay >= 4*60+30 && minuteOfDay < 7*60+30
+
+				if inSunrise && !sunriseAnnounced {
+					handler.SendChatMessage("Parking camera for sunrise viewing until 7:30 AM. Enjoy the view!")
+					sunriseAnnounced = true
+					sunriseEndAnnounced = false
+				} else if !inSunrise && sunriseAnnounced && !sunriseEndAnnounced {
+					handler.SendChatMessage("Sunrise viewing complete. AI boat tracking resumed!")
+					sunriseEndAnnounced = true
+					sunriseAnnounced = false
+				}
+
+				// Announce events coming up in next 30 minutes
+				upcoming := schedule.GetUpcomingEvents(30)
+				for _, event := range upcoming {
+					// Only announce yachts (cruise ships are too frequent and spammy)
+					if event.Type == "YACHT" {
+						msg := FormatEventAnnouncement(event)
+						handler.SendChatMessage(msg)
+						schedule.MarkAnnounced(event.Vessel, event.Time)
+						log.Printf("[SCHEDULE] Announced: %s", msg)
+						time.Sleep(2 * time.Second)
+					}
+				}
+			}
+		}
+	}()
 
 	// Create and start chat bot
 	bot := NewChatBot(service, liveChatID, handler)

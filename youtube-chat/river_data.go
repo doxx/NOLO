@@ -30,7 +30,7 @@ const (
 	cameraLon = -80.1890
 
 	// Detection radius in nautical miles
-	detectionRadius = 0.3 // 0.3nm = ~556 meters = ~1,823 feet
+	detectionRadius = 0.2 // 0.2nm = ~370 meters = ~1,215 feet
 )
 
 // SegmentEvent is a timestamped event for video description enrichment
@@ -274,7 +274,8 @@ func (rd *RiverData) fetchWeather() {
 		return
 	}
 
-	tempF := *p.Temperature.Value*9/5 + 32
+	tempC := *p.Temperature.Value
+	tempF := tempC*9/5 + 32
 	humidity := 0.0
 	if p.RelativeHumidity.Value != nil {
 		humidity = *p.RelativeHumidity.Value
@@ -284,8 +285,8 @@ func (rd *RiverData) fetchWeather() {
 		windMPH = *p.WindSpeed.Value * 0.621371
 	}
 
-	msg := fmt.Sprintf("Miami: %.0f°F, %s, %.0f%% humidity, wind %.0f mph",
-		tempF, p.TextDescription, humidity, windMPH)
+	msg := fmt.Sprintf("Miami: %.0f°F/%.0f°C, %s, %.0f%% humidity, wind %.0f mph",
+		tempF, tempC, p.TextDescription, humidity, windMPH)
 
 	rd.mu.Lock()
 	rd.weatherMsg = msg
@@ -490,9 +491,11 @@ func (rd *RiverData) connectAIS() {
 			LastSeen: time.Now(),
 		}
 
-		// Auto-announce new vessels (max once per 10 minutes per vessel)
+		// Auto-announce new vessels
+		// Skip docked/stationary vessels (speed < 0.3 knots) - they spam AIS from marinas
+		actualSpeed := speed / 10.0 // AIS speed is in 1/10 knot
 		lastAnnounce, wasAnnounced := rd.announced[ais.MetaData.MMSI]
-		shouldAnnounce := !existed && (!wasAnnounced || time.Since(lastAnnounce) > 10*time.Minute)
+		shouldAnnounce := !existed && actualSpeed >= 0.3 && (!wasAnnounced || time.Since(lastAnnounce) > 10*time.Minute)
 
 		if shouldAnnounce {
 			rd.announced[ais.MetaData.MMSI] = time.Now()
