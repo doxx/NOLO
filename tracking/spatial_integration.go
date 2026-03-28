@@ -52,6 +52,10 @@ type SpatialIntegration struct {
 	// Sunrise park state
 	lastSunrisePark     time.Time         // Last time we sent a sunrise park command
 	wasSunriseParked    bool              // Whether we were parked last frame
+
+	// Survey mode - external tool controls camera
+	surveyMode          bool              // When true, all tracking is disabled
+
 	lastLockedPosition  SpatialCoordinate // Where the locked boat was last seen
 	holdoverPositionSet bool              // Whether we've set the holdover position
 
@@ -386,6 +390,25 @@ func (si *SpatialIntegration) debugMsgVerbose(component, message string, boatID 
 	}
 }
 
+// SetSurveyMode enables/disables survey mode (external camera control)
+func (si *SpatialIntegration) SetSurveyMode(enabled bool) {
+	si.mu.Lock()
+	defer si.mu.Unlock()
+	si.surveyMode = enabled
+	if enabled {
+		fmt.Printf("[%s][SURVEY] Survey mode ENABLED - tracking disabled\n", time.Now().Format("15:04:05"))
+	} else {
+		fmt.Printf("[%s][SURVEY] Survey mode DISABLED - tracking resumed\n", time.Now().Format("15:04:05"))
+	}
+}
+
+// IsSurveyMode returns whether survey mode is active
+func (si *SpatialIntegration) IsSurveyMode() bool {
+	si.mu.RLock()
+	defer si.mu.RUnlock()
+	return si.surveyMode
+}
+
 // isSunrisePark checks if the camera should be parked for sunrise viewing
 // Parks at P1120, T020, Z010 from 4:30 AM to 7:30 AM ET
 func (si *SpatialIntegration) isSunrisePark() bool {
@@ -430,6 +453,11 @@ func (si *SpatialIntegration) UpdateTracking(detections []image.Rectangle, class
 	if si.wasSunriseParked {
 		fmt.Printf("[%s][SUNRISE] Sunrise park ended - resuming AI tracking\n", time.Now().Format("15:04:05"))
 		si.wasSunriseParked = false
+	}
+
+	// SURVEY MODE: external tool controls camera, skip all tracking
+	if si.surveyMode {
+		return
 	}
 
 	// Clean up stale data when camera moves

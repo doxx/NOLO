@@ -2513,6 +2513,7 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 			"ok":                 success,
 			"command":            reason,
 			"override_remaining": csm.ManualOverrideRemaining(),
+			"survey_mode":        si.IsSurveyMode(),
 		})
 	}
 
@@ -2654,7 +2655,28 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 		})
 	})
 
-	// Status endpoint
+	// Survey mode endpoints
+	mux.HandleFunc("/survey/start", func(w http.ResponseWriter, r *http.Request) {
+		si.SetSurveyMode(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "survey_mode": true, "message": "Survey mode enabled - tracking disabled"})
+	})
+	mux.HandleFunc("/survey/stop", func(w http.ResponseWriter, r *http.Request) {
+		si.SetSurveyMode(false)
+		pan, tilt, zoom := 1500.0, 100.0, 10.0
+		cmd := ptz.PTZCommand{
+			Command:      "absolutePosition",
+			Reason:       "SURVEY_STOP (return to scan start)",
+			Duration:     2 * time.Second,
+			AbsolutePan:  &pan,
+			AbsoluteTilt: &tilt,
+			AbsoluteZoom: &zoom,
+		}
+		csm.ForceCommand(cmd)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "survey_mode": false, "message": "Survey mode disabled - camera returning to scan position"})
+	})
+
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		pos := si.GetPTZController().GetCurrentPosition()
 		mode := si.GetTrackingMode()
@@ -2666,6 +2688,7 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 			"zoom":               pos.Zoom,
 			"override_active":    csm.IsManualOverrideActive(),
 			"override_remaining": csm.ManualOverrideRemaining(),
+			"survey_mode":        si.IsSurveyMode(),
 			"overlays": map[string]bool{
 				"target":  *overlays.targetOverlay,
 				"console": *overlays.terminalOverlay,

@@ -71,6 +71,8 @@ recordings/
 # AI context files (private project notes, not for public repo)
 CONTEXT.md
 MRC-status.md
+session_handoff.md
+backupstream.md
 
 # Planning docs (contain credentials and private context)
 planning/
