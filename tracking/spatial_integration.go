@@ -1,124 +1,14 @@
 package tracking
 
 import (
-	"encoding/json"
 	"fmt"
 	"image"
 	"math"
-	"os"
 	"sync"
 	"time"
 
 	"rivercam/ptz"
 )
-
-// SurveyCell represents one position from the survey grid, used for
-// spatial awareness during tracking (seawall suppression, corridor prediction)
-type SurveyCell struct {
-	Pan           int      `json:"pan"`
-	Tilt          int      `json:"tilt"`
-	BestScore     int
-	BoatsPossible bool
-	HasSeawall    bool
-	HasBridge     bool
-	Corridor      string
-	MaskAdvice    string
-	Features      []string
-}
-
-// SurveyGrid holds the loaded survey data indexed for fast PTZ lookups
-type SurveyGrid struct {
-	cells    map[string]*SurveyCell
-	panStep  int
-	tiltStep int
-	loaded   bool
-}
-
-// LoadSurveyGrid reads the survey grid JSON and builds a lookup table
-func LoadSurveyGrid(path string) *SurveyGrid {
-	sg := &SurveyGrid{
-		cells:    make(map[string]*SurveyCell),
-		panStep:  100,
-		tiltStep: 100,
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		fmt.Printf("[SURVEY_GRID] Could not load survey grid from %s: %v\n", path, err)
-		return sg
-	}
-
-	var raw map[string]struct {
-		Pan        int `json:"pan"`
-		Tilt       int `json:"tilt"`
-		ZoomLayers []struct {
-			InterestScore   int      `json:"interest_score"`
-			BoatsPossible   bool     `json:"boats_possible"`
-			Features        []string `json:"features"`
-			BoatCorridor    string   `json:"boat_corridor"`
-			MaskAdvice      string   `json:"mask_advice"`
-		} `json:"zoom_layers"`
-	}
-
-	if err := json.Unmarshal(data, &raw); err != nil {
-		fmt.Printf("[SURVEY_GRID] Failed to parse survey grid: %v\n", err)
-		return sg
-	}
-
-	for key, point := range raw {
-		cell := &SurveyCell{
-			Pan:  point.Pan,
-			Tilt: point.Tilt,
-		}
-		for _, zl := range point.ZoomLayers {
-			if zl.InterestScore > cell.BestScore {
-				cell.BestScore = zl.InterestScore
-			}
-			if zl.BoatsPossible {
-				cell.BoatsPossible = true
-			}
-			if zl.BoatCorridor != "" && zl.BoatCorridor != "none" && cell.Corridor == "" {
-				cell.Corridor = zl.BoatCorridor
-			}
-			if zl.MaskAdvice != "" && cell.MaskAdvice == "" {
-				cell.MaskAdvice = zl.MaskAdvice
-			}
-			for _, f := range zl.Features {
-				if f == "seawall" {
-					cell.HasSeawall = true
-				}
-				if f == "bridge" {
-					cell.HasBridge = true
-				}
-			}
-			cell.Features = append(cell.Features, zl.Features...)
-		}
-		sg.cells[key] = cell
-	}
-
-	sg.loaded = true
-	fmt.Printf("[SURVEY_GRID] Loaded %d survey cells from %s\n", len(sg.cells), path)
-	return sg
-}
-
-// Lookup finds the nearest survey cell to a given PTZ position
-func (sg *SurveyGrid) Lookup(pan, tilt float64) *SurveyCell {
-	if !sg.loaded || len(sg.cells) == 0 {
-		return nil
-	}
-	roundedPan := int(math.Round(pan/float64(sg.panStep))) * sg.panStep
-	roundedTilt := int(math.Round(tilt/float64(sg.tiltStep))) * sg.tiltStep
-	key := fmt.Sprintf("P%04d_T%04d", roundedPan, roundedTilt)
-	if cell, ok := sg.cells[key]; ok {
-		return cell
-	}
-	return nil
-}
-
-// IsLoaded returns whether survey data was successfully loaded
-func (sg *SurveyGrid) IsLoaded() bool {
-	return sg.loaded
-}
 
 // SpatialIntegration is now the PRIMARY tracking system (no more legacy confusion)
 type SpatialIntegration struct {
@@ -165,9 +55,6 @@ type SpatialIntegration struct {
 
 	// Survey mode - external tool controls camera
 	surveyMode          bool              // When true, all tracking is disabled
-
-	// Survey spatial awareness - loaded from survey grid JSON
-	surveyGrid          *SurveyGrid
 
 	lastLockedPosition  SpatialCoordinate // Where the locked boat was last seen
 	holdoverPositionSet bool              // Whether we've set the holdover position
@@ -429,13 +316,6 @@ func NewSpatialIntegration(ptzCtrl ptz.Controller, frameWidth, frameHeight int, 
 		"tracking_mode":          "LIGHTNING_FAST",
 	})
 
-	// Load survey grid for spatial awareness (seawall suppression, corridor prediction)
-	surveyPath := "/home/blyon/NOLO/survey-data/grid_gpt-5.2.json"
-	integration.surveyGrid = LoadSurveyGrid(surveyPath)
-	if integration.surveyGrid.IsLoaded() {
-		integration.debugMsg("SPATIAL_INIT", fmt.Sprintf("Survey grid loaded with %d cells", len(integration.surveyGrid.cells)))
-	}
-
 	integration.debugMsg("MULTI_TRACKING", fmt.Sprintf("Initialized multi-object tracking system (%dx%d)", frameWidth, frameHeight))
 	integration.debugMsg("MULTI_TRACKING", fmt.Sprintf("LIGHTNING-FAST Lock: %d detections (~%.2fs), max %d lost frames (%.1fs at 30fps)",
 		integration.minDetectionsForLock, float64(integration.minDetectionsForLock)/30.0, integration.maxLostFrames, float64(integration.maxLostFrames)/30.0))
@@ -520,15 +400,6 @@ func (si *SpatialIntegration) SetSurveyMode(enabled bool) {
 	} else {
 		fmt.Printf("[%s][SURVEY] Survey mode DISABLED - tracking resumed\n", time.Now().Format("15:04:05"))
 	}
-}
-
-// GetSurveyCell returns the survey cell for the current camera position
-func (si *SpatialIntegration) GetSurveyCell() *SurveyCell {
-	if si.surveyGrid == nil {
-		return nil
-	}
-	pos := si.ptzCtrl.GetCurrentPosition()
-	return si.surveyGrid.Lookup(pos.Pan, pos.Tilt)
 }
 
 // IsSurveyMode returns whether survey mode is active
@@ -2699,30 +2570,12 @@ func (si *SpatialIntegration) calculateTargetingScore(boat *TrackedBoat) float64
 			boat.Classification, boat.ID, enhancementBonus, boat.P2Count, enhancementType), boat.ID)
 	}
 
-	// Survey-based seawall suppression: penalize detections at positions
-	// where the survey found seawall structures that YOLO mistakes for boats
-	seawallPenalty := 1.0
-	if si.surveyGrid != nil && si.surveyGrid.IsLoaded() {
-		pos := si.ptzCtrl.GetCurrentPosition()
-		if cell := si.surveyGrid.Lookup(pos.Pan, pos.Tilt); cell != nil {
-			if cell.HasSeawall && !cell.BoatsPossible {
-				seawallPenalty = 0.2
-				fmt.Printf("[%s][SEAWALL] Seawall-only zone at P%d T%d - heavy penalty (x0.2) for %s %s\n",
-					time.Now().Format("15:04:05"), cell.Pan, cell.Tilt, boat.Classification, boat.ID)
-			} else if cell.HasSeawall && cell.BoatsPossible {
-				seawallPenalty = 0.6
-				fmt.Printf("[%s][SEAWALL] Seawall+water zone at P%d T%d - moderate penalty (x0.6) for %s %s\n",
-					time.Now().Format("15:04:05"), cell.Pan, cell.Tilt, boat.Classification, boat.ID)
-			}
-		}
-	}
-
 	// Combine scores - REBALANCED: Favor large P1 objects (mega yachts) over small P1 objects with P2 enhancements
-	totalScore := (detectionScore*0.15 + confidenceScore*0.15 + centerScore*0.10 + sizeScore*0.25 + stabilityBonus*0.15 + enhancementBonus*0.20) * lostFramesPenalty * seawallPenalty
+	totalScore := (detectionScore*0.15 + confidenceScore*0.15 + centerScore*0.10 + sizeScore*0.25 + stabilityBonus*0.15 + enhancementBonus*0.20) * lostFramesPenalty
 
 	// Debug output to understand scoring decisions
-	si.debugMsg("SCORE_DEBUG", fmt.Sprintf("%s %s: det=%.2f(%.0f), conf=%.2f, center=%.2f, size=%.2f, stable=%.2f, p2bonus=%.2f, lost=%.2f, seawall=%.2f -> TOTAL=%.3f",
-		boat.Classification, boat.ID, detectionScore, float64(boat.DetectionCount), confidenceScore, centerScore, sizeScore, stabilityBonus, enhancementBonus, lostFramesPenalty, seawallPenalty, totalScore), boat.ID)
+	si.debugMsg("SCORE_DEBUG", fmt.Sprintf("%s %s: det=%.2f(%.0f), conf=%.2f, center=%.2f, size=%.2f, stable=%.2f, p2bonus=%.2f, penalty=%.2f → TOTAL=%.3f",
+		boat.Classification, boat.ID, detectionScore, float64(boat.DetectionCount), confidenceScore, centerScore, sizeScore, stabilityBonus, enhancementBonus, lostFramesPenalty, totalScore), boat.ID)
 
 	return totalScore
 }
@@ -4225,7 +4078,7 @@ func (si *SpatialIntegration) executePredictiveMove1() {
 			Zoom: lastPos.Zoom * 0.80, // Zoom out 20% to widen search
 		}
 
-		si.debugMsg("RECOVERY_PREDICT", fmt.Sprintf("PTZ extrapolation: (%.0f,%.0f) + %.1fs x vel(%.1f,%.1f) = (%.0f,%.0f)",
+		si.debugMsg("RECOVERY_PREDICT", fmt.Sprintf("PTZ extrapolation: (%.0f,%.0f) + %.1fs × vel(%.1f,%.1f) = (%.0f,%.0f)",
 			lastPos.Pan, lastPos.Tilt, clampedElapsed,
 			si.recoveryData.PTZVelocityPan, si.recoveryData.PTZVelocityTilt,
 			predictedSpatial.Pan, predictedSpatial.Tilt), si.recoveryData.ObjectID)

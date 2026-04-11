@@ -1,0 +1,596 @@
+{
+  "capture_date": "2026-03-28T08:56:13-04:00",
+  "pan_range": [
+    900,
+    2550
+  ],
+  "tilt_range": [
+    50,
+    400
+  ],
+  "pan_step": 300,
+  "tilt_step": 100,
+  "zoom_levels": [
+    10,
+    60,
+    120
+  ],
+  "positions": [
+    {
+      "pan": 900,
+      "tilt": 50,
+      "zoom": 10,
+      "key": "P0900_T0050",
+      "image_file": "/tmp/survey3/images/P0900_T0050_Z010.jpg",
+      "timestamp": "2026-03-28T08:52:22-04:00"
+    },
+    {
+      "pan": 900,
+      "tilt": 50,
+      "zoom": 60,
+      "key": "P0900_T0050",
+      "image_file": "/tmp/survey3/images/P0900_T0050_Z060.jpg",
+      "timestamp": "2026-03-28T08:52:25-04:00"
+    },
+    {
+      "pan": 900,
+      "tilt": 50,
+      "zoom": 120,
+      "key": "P0900_T0050",
+      "image_file": "/tmp/survey3/images/P0900_T0050_Z120.jpg",
+      "timestamp": "2026-03-28T08:52:28-04:00"
+    },
+    {
+      "pan": 1200,
+      "tilt": 50,
+      "zoom": 10,
+      "key": "P1200_T0050",
+      "image_file": "/tmp/survey3/images/P1200_T0050_Z010.jpg",
+      "timestamp": "2026-03-28T08:52:31-04:00"
+    },
+    {
+      "pan": 1200,
+      "tilt": 50,
+      "zoom": 60,
+      "key": "P1200_T0050",
+      "image_file": "/tmp/survey3/images/P1200_T0050_Z060.jpg",
+      "timestamp": "2026-03-28T08:52:35-04:00"
+    },
+    {
+      "pan": 1200,
+      "tilt": 50,
+      "zoom": 120,
+      "key": "P1200_T0050",
+      "image_file": "/tmp/survey3/images/P1200_T0050_Z120.jpg",
+      "timestamp": "2026-03-28T08:52:38-04:00"
+    },
+    {
+      "pan": 1500,
+      "tilt": 50,
+      "zoom": 10,
+      "key": "P1500_T0050",
+      "image_file": "/tmp/survey3/images/P1500_T0050_Z010.jpg",
+      "timestamp": "2026-03-28T08:52:41-04:00"
+    },
+    {
+      "pan": 1500,
+      "tilt": 50,
+      "zoom": 60,
+      "key": "P1500_T0050",
+      "image_file": "/tmp/survey3/images/P1500_T0050_Z060.jpg",
+      "timestamp": "2026-03-28T08:52:44-04:00"
+    },
+    {
+      "pan": 1500,
+      "tilt": 50,
+      "zoom": 120,
+      "key": "P1500_T0050",
+      "image_file": "/tmp/survey3/images/P1500_T0050_Z120.jpg",
+      "timestamp": "2026-03-28T08:52:48-04:00"
+    },
+    {
+      "pan": 1800,
+      "tilt": 50,
+      "zoom": 10,
+      "key": "P1800_T0050",
+      "image_file": "/tmp/survey3/images/P1800_T0050_Z010.jpg",
+      "timestamp": "2026-03-28T08:52:51-04:00"
+    },
+    {
+      "pan": 1800,
+      "tilt": 50,
+      "zoom": 60,
+      "key": "P1800_T0050",
+      "image_file": "/tmp/survey3/images/P1800_T0050_Z060.jpg",
+      "timestamp": "2026-03-28T08:52:54-04:00"
+    },
+    {
+      "pan": 1800,
+      "tilt": 50,
+      "zoom": 120,
+      "key": "P1800_T0050",
+      "image_file": "/tmp/survey3/images/P1800_T0050_Z120.jpg",
+      "timestamp": "2026-03-28T08:52:57-04:00"
+    },
+    {
+      "pan": 2100,
+      "tilt": 50,
+      "zoom": 10,
+      "key": "P2100_T0050",
+      "image_file": "/tmp/survey3/images/P2100_T0050_Z010.jpg",
+      "timestamp": "2026-03-28T08:53:01-04:00"
+    },
+    {
+      "pan": 2100,
+      "tilt": 50,
+      "zoom": 60,
+      "key": "P2100_T0050",
+      "image_file": "/tmp/survey3/images/P2100_T0050_Z060.jpg",
+      "timestamp": "2026-03-28T08:53:04-04:00"
+    },
+    {
+      "pan": 2100,
+      "tilt": 50,
+      "zoom": 120,
+      "key": "P2100_T0050",
+      "image_file": "/tmp/survey3/images/P2100_T0050_Z120.jpg",
+      "timestamp": "2026-03-28T08:53:07-04:00"
+    },
+    {
+      "pan": 2400,
+      "tilt": 50,
+      "zoom": 10,
+      "key": "P2400_T0050",
+      "image_file": "/tmp/survey3/images/P2400_T0050_Z010.jpg",
+      "timestamp": "2026-03-28T08:53:11-04:00"
+    },
+    {
+      "pan": 2400,
+      "tilt": 50,
+      "zoom": 60,
+      "key": "P2400_T0050",
+      "image_file": "/tmp/survey3/images/P2400_T0050_Z060.jpg",
+      "timestamp": "2026-03-28T08:53:14-04:00"
+    },
+    {
+      "pan": 2400,
+      "tilt": 50,
+      "zoom": 120,
+      "key": "P2400_T0050",
+      "image_file": "/tmp/survey3/images/P2400_T0050_Z120.jpg",
+      "timestamp": "2026-03-28T08:53:17-04:00"
+    },
+    {
+      "pan": 2550,
+      "tilt": 150,
+      "zoom": 10,
+      "key": "P2550_T0150",
+      "image_file": "/tmp/survey3/images/P2550_T0150_Z010.jpg",
+      "timestamp": "2026-03-28T08:53:20-04:00"
+    },
+    {
+      "pan": 2550,
+      "tilt": 150,
+      "zoom": 60,
+      "key": "P2550_T0150",
+      "image_file": "/tmp/survey3/images/P2550_T0150_Z060.jpg",
+      "timestamp": "2026-03-28T08:53:24-04:00"
+    },
+    {
+      "pan": 2550,
+      "tilt": 150,
+      "zoom": 120,
+      "key": "P2550_T0150",
+      "image_file": "/tmp/survey3/images/P2550_T0150_Z120.jpg",
+      "timestamp": "2026-03-28T08:53:27-04:00"
+    },
+    {
+      "pan": 2250,
+      "tilt": 150,
+      "zoom": 10,
+      "key": "P2250_T0150",
+      "image_file": "/tmp/survey3/images/P2250_T0150_Z010.jpg",
+      "timestamp": "2026-03-28T08:53:30-04:00"
+    },
+    {
+      "pan": 2250,
+      "tilt": 150,
+      "zoom": 60,
+      "key": "P2250_T0150",
+      "image_file": "/tmp/survey3/images/P2250_T0150_Z060.jpg",
+      "timestamp": "2026-03-28T08:53:34-04:00"
+    },
+    {
+      "pan": 2250,
+      "tilt": 150,
+      "zoom": 120,
+      "key": "P2250_T0150",
+      "image_file": "/tmp/survey3/images/P2250_T0150_Z120.jpg",
+      "timestamp": "2026-03-28T08:53:37-04:00"
+    },
+    {
+      "pan": 1950,
+      "tilt": 150,
+      "zoom": 10,
+      "key": "P1950_T0150",
+      "image_file": "/tmp/survey3/images/P1950_T0150_Z010.jpg",
+      "timestamp": "2026-03-28T08:53:40-04:00"
+    },
+    {
+      "pan": 1950,
+      "tilt": 150,
+      "zoom": 60,
+      "key": "P1950_T0150",
+      "image_file": "/tmp/survey3/images/P1950_T0150_Z060.jpg",
+      "timestamp": "2026-03-28T08:53:44-04:00"
+    },
+    {
+      "pan": 1950,
+      "tilt": 150,
+      "zoom": 120,
+      "key": "P1950_T0150",
+      "image_file": "/tmp/survey3/images/P1950_T0150_Z120.jpg",
+      "timestamp": "2026-03-28T08:53:47-04:00"
+    },
+    {
+      "pan": 1650,
+      "tilt": 150,
+      "zoom": 10,
+      "key": "P1650_T0150",
+      "image_file": "/tmp/survey3/images/P1650_T0150_Z010.jpg",
+      "timestamp": "2026-03-28T08:53:50-04:00"
+    },
+    {
+      "pan": 1650,
+      "tilt": 150,
+      "zoom": 60,
+      "key": "P1650_T0150",
+      "image_file": "/tmp/survey3/images/P1650_T0150_Z060.jpg",
+      "timestamp": "2026-03-28T08:53:54-04:00"
+    },
+    {
+      "pan": 1650,
+      "tilt": 150,
+      "zoom": 120,
+      "key": "P1650_T0150",
+      "image_file": "/tmp/survey3/images/P1650_T0150_Z120.jpg",
+      "timestamp": "2026-03-28T08:53:57-04:00"
+    },
+    {
+      "pan": 1350,
+      "tilt": 150,
+      "zoom": 10,
+      "key": "P1350_T0150",
+      "image_file": "/tmp/survey3/images/P1350_T0150_Z010.jpg",
+      "timestamp": "2026-03-28T08:54:00-04:00"
+    },
+    {
+      "pan": 1350,
+      "tilt": 150,
+      "zoom": 60,
+      "key": "P1350_T0150",
+      "image_file": "/tmp/survey3/images/P1350_T0150_Z060.jpg",
+      "timestamp": "2026-03-28T08:54:04-04:00"
+    },
+    {
+      "pan": 1350,
+      "tilt": 150,
+      "zoom": 120,
+      "key": "P1350_T0150",
+      "image_file": "/tmp/survey3/images/P1350_T0150_Z120.jpg",
+      "timestamp": "2026-03-28T08:54:07-04:00"
+    },
+    {
+      "pan": 1050,
+      "tilt": 150,
+      "zoom": 10,
+      "key": "P1050_T0150",
+      "image_file": "/tmp/survey3/images/P1050_T0150_Z010.jpg",
+      "timestamp": "2026-03-28T08:54:10-04:00"
+    },
+    {
+      "pan": 1050,
+      "tilt": 150,
+      "zoom": 60,
+      "key": "P1050_T0150",
+      "image_file": "/tmp/survey3/images/P1050_T0150_Z060.jpg",
+      "timestamp": "2026-03-28T08:54:14-04:00"
+    },
+    {
+      "pan": 1050,
+      "tilt": 150,
+      "zoom": 120,
+      "key": "P1050_T0150",
+      "image_file": "/tmp/survey3/images/P1050_T0150_Z120.jpg",
+      "timestamp": "2026-03-28T08:54:17-04:00"
+    },
+    {
+      "pan": 900,
+      "tilt": 250,
+      "zoom": 10,
+      "key": "P0900_T0250",
+      "image_file": "/tmp/survey3/images/P0900_T0250_Z010.jpg",
+      "timestamp": "2026-03-28T08:54:20-04:00"
+    },
+    {
+      "pan": 900,
+      "tilt": 250,
+      "zoom": 60,
+      "key": "P0900_T0250",
+      "image_file": "/tmp/survey3/images/P0900_T0250_Z060.jpg",
+      "timestamp": "2026-03-28T08:54:23-04:00"
+    },
+    {
+      "pan": 900,
+      "tilt": 250,
+      "zoom": 120,
+      "key": "P0900_T0250",
+      "image_file": "/tmp/survey3/images/P0900_T0250_Z120.jpg",
+      "timestamp": "2026-03-28T08:54:26-04:00"
+    },
+    {
+      "pan": 1200,
+      "tilt": 250,
+      "zoom": 10,
+      "key": "P1200_T0250",
+      "image_file": "/tmp/survey3/images/P1200_T0250_Z010.jpg",
+      "timestamp": "2026-03-28T08:54:30-04:00"
+    },
+    {
+      "pan": 1200,
+      "tilt": 250,
+      "zoom": 60,
+      "key": "P1200_T0250",
+      "image_file": "/tmp/survey3/images/P1200_T0250_Z060.jpg",
+      "timestamp": "2026-03-28T08:54:33-04:00"
+    },
+    {
+      "pan": 1200,
+      "tilt": 250,
+      "zoom": 120,
+      "key": "P1200_T0250",
+      "image_file": "/tmp/survey3/images/P1200_T0250_Z120.jpg",
+      "timestamp": "2026-03-28T08:54:37-04:00"
+    },
+    {
+      "pan": 1500,
+      "tilt": 250,
+      "zoom": 10,
+      "key": "P1500_T0250",
+      "image_file": "/tmp/survey3/images/P1500_T0250_Z010.jpg",
+      "timestamp": "2026-03-28T08:54:40-04:00"
+    },
+    {
+      "pan": 1500,
+      "tilt": 250,
+      "zoom": 60,
+      "key": "P1500_T0250",
+      "image_file": "/tmp/survey3/images/P1500_T0250_Z060.jpg",
+      "timestamp": "2026-03-28T08:54:43-04:00"
+    },
+    {
+      "pan": 1500,
+      "tilt": 250,
+      "zoom": 120,
+      "key": "P1500_T0250",
+      "image_file": "/tmp/survey3/images/P1500_T0250_Z120.jpg",
+      "timestamp": "2026-03-28T08:54:46-04:00"
+    },
+    {
+      "pan": 1800,
+      "tilt": 250,
+      "zoom": 10,
+      "key": "P1800_T0250",
+      "image_file": "/tmp/survey3/images/P1800_T0250_Z010.jpg",
+      "timestamp": "2026-03-28T08:54:50-04:00"
+    },
+    {
+      "pan": 1800,
+      "tilt": 250,
+      "zoom": 60,
+      "key": "P1800_T0250",
+      "image_file": "/tmp/survey3/images/P1800_T0250_Z060.jpg",
+      "timestamp": "2026-03-28T08:54:53-04:00"
+    },
+    {
+      "pan": 1800,
+      "tilt": 250,
+      "zoom": 120,
+      "key": "P1800_T0250",
+      "image_file": "/tmp/survey3/images/P1800_T0250_Z120.jpg",
+      "timestamp": "2026-03-28T08:54:56-04:00"
+    },
+    {
+      "pan": 2100,
+      "tilt": 250,
+      "zoom": 10,
+      "key": "P2100_T0250",
+      "image_file": "/tmp/survey3/images/P2100_T0250_Z010.jpg",
+      "timestamp": "2026-03-28T08:54:59-04:00"
+    },
+    {
+      "pan": 2100,
+      "tilt": 250,
+      "zoom": 60,
+      "key": "P2100_T0250",
+      "image_file": "/tmp/survey3/images/P2100_T0250_Z060.jpg",
+      "timestamp": "2026-03-28T08:55:02-04:00"
+    },
+    {
+      "pan": 2100,
+      "tilt": 250,
+      "zoom": 120,
+      "key": "P2100_T0250",
+      "image_file": "/tmp/survey3/images/P2100_T0250_Z120.jpg",
+      "timestamp": "2026-03-28T08:55:06-04:00"
+    },
+    {
+      "pan": 2400,
+      "tilt": 250,
+      "zoom": 10,
+      "key": "P2400_T0250",
+      "image_file": "/tmp/survey3/images/P2400_T0250_Z010.jpg",
+      "timestamp": "2026-03-28T08:55:09-04:00"
+    },
+    {
+      "pan": 2400,
+      "tilt": 250,
+      "zoom": 60,
+      "key": "P2400_T0250",
+      "image_file": "/tmp/survey3/images/P2400_T0250_Z060.jpg",
+      "timestamp": "2026-03-28T08:55:12-04:00"
+    },
+    {
+      "pan": 2400,
+      "tilt": 250,
+      "zoom": 120,
+      "key": "P2400_T0250",
+      "image_file": "/tmp/survey3/images/P2400_T0250_Z120.jpg",
+      "timestamp": "2026-03-28T08:55:15-04:00"
+    },
+    {
+      "pan": 2550,
+      "tilt": 350,
+      "zoom": 10,
+      "key": "P2550_T0350",
+      "image_file": "/tmp/survey3/images/P2550_T0350_Z010.jpg",
+      "timestamp": "2026-03-28T08:55:18-04:00"
+    },
+    {
+      "pan": 2550,
+      "tilt": 350,
+      "zoom": 60,
+      "key": "P2550_T0350",
+      "image_file": "/tmp/survey3/images/P2550_T0350_Z060.jpg",
+      "timestamp": "2026-03-28T08:55:22-04:00"
+    },
+    {
+      "pan": 2550,
+      "tilt": 350,
+      "zoom": 120,
+      "key": "P2550_T0350",
+      "image_file": "/tmp/survey3/images/P2550_T0350_Z120.jpg",
+      "timestamp": "2026-03-28T08:55:25-04:00"
+    },
+    {
+      "pan": 2250,
+      "tilt": 350,
+      "zoom": 10,
+      "key": "P2250_T0350",
+      "image_file": "/tmp/survey3/images/P2250_T0350_Z010.jpg",
+      "timestamp": "2026-03-28T08:55:28-04:00"
+    },
+    {
+      "pan": 2250,
+      "tilt": 350,
+      "zoom": 60,
+      "key": "P2250_T0350",
+      "image_file": "/tmp/survey3/images/P2250_T0350_Z060.jpg",
+      "timestamp": "2026-03-28T08:55:31-04:00"
+    },
+    {
+      "pan": 2250,
+      "tilt": 350,
+      "zoom": 120,
+      "key": "P2250_T0350",
+      "image_file": "/tmp/survey3/images/P2250_T0350_Z120.jpg",
+      "timestamp": "2026-03-28T08:55:35-04:00"
+    },
+    {
+      "pan": 1950,
+      "tilt": 350,
+      "zoom": 10,
+      "key": "P1950_T0350",
+      "image_file": "/tmp/survey3/images/P1950_T0350_Z010.jpg",
+      "timestamp": "2026-03-28T08:55:38-04:00"
+    },
+    {
+      "pan": 1950,
+      "tilt": 350,
+      "zoom": 60,
+      "key": "P1950_T0350",
+      "image_file": "/tmp/survey3/images/P1950_T0350_Z060.jpg",
+      "timestamp": "2026-03-28T08:55:41-04:00"
+    },
+    {
+      "pan": 1950,
+      "tilt": 350,
+      "zoom": 120,
+      "key": "P1950_T0350",
+      "image_file": "/tmp/survey3/images/P1950_T0350_Z120.jpg",
+      "timestamp": "2026-03-28T08:55:44-04:00"
+    },
+    {
+      "pan": 1650,
+      "tilt": 350,
+      "zoom": 10,
+      "key": "P1650_T0350",
+      "image_file": "/tmp/survey3/images/P1650_T0350_Z010.jpg",
+      "timestamp": "2026-03-28T08:55:47-04:00"
+    },
+    {
+      "pan": 1650,
+      "tilt": 350,
+      "zoom": 60,
+      "key": "P1650_T0350",
+      "image_file": "/tmp/survey3/images/P1650_T0350_Z060.jpg",
+      "timestamp": "2026-03-28T08:55:50-04:00"
+    },
+    {
+      "pan": 1650,
+      "tilt": 350,
+      "zoom": 120,
+      "key": "P1650_T0350",
+      "image_file": "/tmp/survey3/images/P1650_T0350_Z120.jpg",
+      "timestamp": "2026-03-28T08:55:54-04:00"
+    },
+    {
+      "pan": 1350,
+      "tilt": 350,
+      "zoom": 10,
+      "key": "P1350_T0350",
+      "image_file": "/tmp/survey3/images/P1350_T0350_Z010.jpg",
+      "timestamp": "2026-03-28T08:55:57-04:00"
+    },
+    {
+      "pan": 1350,
+      "tilt": 350,
+      "zoom": 60,
+      "key": "P1350_T0350",
+      "image_file": "/tmp/survey3/images/P1350_T0350_Z060.jpg",
+      "timestamp": "2026-03-28T08:56:00-04:00"
+    },
+    {
+      "pan": 1350,
+      "tilt": 350,
+      "zoom": 120,
+      "key": "P1350_T0350",
+      "image_file": "/tmp/survey3/images/P1350_T0350_Z120.jpg",
+      "timestamp": "2026-03-28T08:56:03-04:00"
+    },
+    {
+      "pan": 1050,
+      "tilt": 350,
+      "zoom": 10,
+      "key": "P1050_T0350",
+      "image_file": "/tmp/survey3/images/P1050_T0350_Z010.jpg",
+      "timestamp": "2026-03-28T08:56:07-04:00"
+    },
+    {
+      "pan": 1050,
+      "tilt": 350,
+      "zoom": 60,
+      "key": "P1050_T0350",
+      "image_file": "/tmp/survey3/images/P1050_T0350_Z060.jpg",
+      "timestamp": "2026-03-28T08:56:10-04:00"
+    },
+    {
+      "pan": 1050,
+      "tilt": 350,
+      "zoom": 120,
+      "key": "P1050_T0350",
+      "image_file": "/tmp/survey3/images/P1050_T0350_Z120.jpg",
+      "timestamp": "2026-03-28T08:56:13-04:00"
+    }
+  ]
+}
