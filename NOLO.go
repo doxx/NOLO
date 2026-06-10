@@ -3136,7 +3136,7 @@ func main() {
 	errorChan := make(chan error, 1)
 
 	// Start frame capture goroutine
-	go captureFrames(webcam, frameChan, errorChan, stats)
+	go captureFrames(webcam, streamURL, frameChan, errorChan, stats)
 
 	// Start FFmpeg writer goroutine
 	go writeFrames(frameChan, ffmpegManager, renderer, spatialIntegration, &net, classNames, stats, ffmpegManager.GetStopChan(), *debugMode, debugManager, cameraStateManager, *pipZoomEnabled, gpuMonitor, rtmpChecker, ffmpegMonitor)
@@ -3602,30 +3602,76 @@ func setupFFmpeg(pictureSize string) *exec.Cmd {
 }
 
 // captureFrames handles frame capture from the camera
-func captureFrames(webcam *gocv.VideoCapture, frameChan chan<- FrameData, errorChan chan<- error, stats *PipelineStats) {
+func captureFrames(webcam *gocv.VideoCapture, streamURL string, frameChan chan<- FrameData, errorChan chan<- error, stats *PipelineStats) {
 	frameSequence := int64(0)
+	lastFrame := gocv.NewMat()
+	hasLastFrame := false
+	defer lastFrame.Close()
 
 	for {
 		readStart := time.Now()
 		img := gocv.NewMat()
 		trackMatAlloc("capture")
 
-		// Try to read frame - NO ARTIFICIAL DELAY, read as fast as camera provides
 		if ok := webcam.Read(&img); !ok {
 			img.Close()
 			trackMatClose("capture")
-			errorChan <- fmt.Errorf("failed to read frame from stream")
-			return
+			debugMsg("RTSP_RECONNECT", "Camera feed lost - entering reconnect mode")
+			webcam.Close()
+
+			reconnected := false
+			for attempt := 1; attempt <= 60; attempt++ {
+				debugMsg("RTSP_RECONNECT", fmt.Sprintf("Attempt %d/60 - feeding last frame while retrying...", attempt))
+
+				if hasLastFrame && !lastFrame.Empty() {
+					for tick := 0; tick < 150; tick++ {
+						clone := gocv.NewMat()
+						lastFrame.CopyTo(&clone)
+						trackMatAlloc("capture")
+						fd := FrameData{frame: clone, sequence: frameSequence, timestamp: time.Now()}
+						select {
+						case frameChan <- fd:
+							frameSequence++
+						default:
+							clone.Close()
+							trackMatClose("capture")
+						}
+						time.Sleep(33 * time.Millisecond)
+					}
+				} else {
+					time.Sleep(5 * time.Second)
+				}
+
+				newWebcam, err := gocv.VideoCaptureFile(streamURL)
+				if err != nil {
+					continue
+				}
+				newWebcam.Set(gocv.VideoCaptureBufferSize, 1)
+				testImg := gocv.NewMat()
+				if ok := newWebcam.Read(&testImg); ok && !testImg.Empty() {
+					testImg.Close()
+					webcam = newWebcam
+					reconnected = true
+					debugMsg("RTSP_RECONNECT", fmt.Sprintf("Reconnected after %d attempts", attempt))
+					break
+				}
+				testImg.Close()
+				newWebcam.Close()
+			}
+
+			if !reconnected {
+				errorChan <- fmt.Errorf("RTSP reconnect failed after 60 attempts (5 minutes)")
+				return
+			}
+			continue
 		}
 
-		// Check if frame is valid
 		if img.Empty() {
 			img.Close()
 			trackMatClose("capture")
 			continue
 		}
 
-		// Verify frame dimensions and type
 		if img.Type() != gocv.MatTypeCV8UC3 || img.Channels() != 3 {
 			img.Close()
 			trackMatClose("capture")
@@ -3634,19 +3680,19 @@ func captureFrames(webcam *gocv.VideoCapture, frameChan chan<- FrameData, errorC
 
 		stats.UpdateCapture(time.Since(readStart))
 
-		// Create frame data with current sequence
+		img.CopyTo(&lastFrame)
+		hasLastFrame = true
+
 		frameData := FrameData{
 			frame:     img,
 			sequence:  frameSequence,
-			timestamp: time.Now(), // Real-time timestamp when frame was actually read
+			timestamp: time.Now(),
 		}
 
 		select {
 		case frameChan <- frameData:
-			// Frame sent successfully - increment sequence for next frame
 			frameSequence++
 		default:
-			// Channel full, drop frame and continue reading (sequence not incremented - will retry)
 			img.Close()
 			trackMatClose("capture")
 		}
