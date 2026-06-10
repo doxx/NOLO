@@ -1730,7 +1730,7 @@ func (m *FFmpegManager) monitor() {
 		defer ticker.Stop()
 
 		lastWriteCheck := time.Now()
-		writeStallThreshold := 5 * time.Second
+		writeStallThreshold := 15 * time.Second
 
 		for {
 			select {
@@ -3910,18 +3910,25 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 							data2D := output.Reshape(1, numFields)
 							defer data2D.Close()
 
+							// PERFORMANCE: Bulk read entire tensor in one CGO call
+							// instead of per-element GetFloatAt (was 705K CGO calls/frame)
+							rawData, rawErr := data2D.DataPtrFloat32()
+							if rawErr != nil {
+								debugMsg("YOLO_ERROR", fmt.Sprintf("Failed to get v8n tensor data: %v", rawErr))
+							}
+
 							// Collect candidates for NMS
 							var nmsBoxes []image.Rectangle
 							var nmsConfidences []float32
 							var nmsClassIDs []int
 							var nmsClassNames []string
 
-							for i := 0; i < numDetections; i++ {
-								// Find best class score (no objectness in v8)
+							stride := numDetections // row-major: data[field * stride + detection]
+							for i := 0; i < numDetections && rawErr == nil; i++ {
 								var maxScore float32
 								var maxClassID int
 								for c := 0; c < 80; c++ {
-									score := data2D.GetFloatAt(c+4, i)
+									score := rawData[(c+4)*stride+i]
 									if score > maxScore {
 										maxScore = score
 										maxClassID = c
@@ -3934,10 +3941,10 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 								}
 
 								// v8 coordinates are in input pixel space (0-640)
-								cx := float64(data2D.GetFloatAt(0, i))
-								cy := float64(data2D.GetFloatAt(1, i))
-								w := float64(data2D.GetFloatAt(2, i))
-								h := float64(data2D.GetFloatAt(3, i))
+								cx := float64(rawData[0*stride+i])
+								cy := float64(rawData[1*stride+i])
+								w := float64(rawData[2*stride+i])
+								h := float64(rawData[3*stride+i])
 
 								// Transform from letterboxed input space to original frame coordinates
 								origX := cx * float64(scaleX)
