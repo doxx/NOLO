@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -1379,6 +1380,7 @@ type FFmpegManager struct {
 	restartCount    int
 	lastRestartTime time.Time
 	isRestarting    bool
+	monitorCancel   context.CancelFunc
 }
 
 // TimedFrame represents a frame with sequencing information
@@ -1729,6 +1731,10 @@ func (m *FFmpegManager) UpdateFlushInfo(err error) {
 func (m *FFmpegManager) monitor() {
 	debugMsg("FFMPEG_MONITOR", fmt.Sprintf("Starting FFmpeg process monitor (PID: %d)", m.cmd.Process.Pid))
 
+	// Create cancel context for health check goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+	m.monitorCancel = cancel
+
 	// Enhanced monitoring with multiple checks
 	go func() {
 		// Check process status every 50ms (faster detection)
@@ -1740,6 +1746,9 @@ func (m *FFmpegManager) monitor() {
 
 		for {
 			select {
+			case <-ctx.Done():
+				debugMsg("FFMPEG_MONITOR", "Health check goroutine cancelled (FFmpeg restarting)")
+				return
 			case <-ticker.C:
 				// Check if process still exists
 				if m.cmd.Process != nil {
@@ -1841,6 +1850,11 @@ func (m *FFmpegManager) restartFFmpeg() error {
 
 	m.isRestarting = true
 	defer func() { m.isRestarting = false }()
+
+	// Cancel the old monitor health check goroutine
+	if m.monitorCancel != nil {
+		m.monitorCancel()
+	}
 
 	debugMsg("FFMPEG_RESTART", "Stopping old FFmpeg process...")
 
