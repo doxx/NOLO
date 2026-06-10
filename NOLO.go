@@ -1374,6 +1374,11 @@ type FFmpegManager struct {
 	lastProcessState *os.ProcessState
 	debugMu          sync.Mutex
 	startTime        time.Time // Track when FFmpeg started
+
+	// FFmpeg restart tracking
+	restartCount    int
+	lastRestartTime time.Time
+	isRestarting    bool
 }
 
 // TimedFrame represents a frame with sequencing information
@@ -1649,8 +1654,9 @@ func (m *FFmpegManager) timedWriteWorker() {
 					m.UpdateDebugInfo(len(frame.data), writeTime, err)
 
 					if err != nil {
-						debugMsgVerbose("FFMPEG_SEQUENCE", fmt.Sprintf("Write error for frame %d: %v", frame.frameNum, err))
-						return // Exit worker on error
+						debugMsgVerbose("FFMPEG_SEQUENCE", fmt.Sprintf("Write error for frame %d (FFmpeg may be restarting): %v", frame.frameNum, err))
+						time.Sleep(100 * time.Millisecond)
+						break // Skip remaining pending frames, wait for next from writeQueue
 					}
 
 					// Debug info every 300 frames (10 seconds at 30fps)
@@ -1762,6 +1768,7 @@ func (m *FFmpegManager) monitor() {
 						if timeSinceLastWrite > writeStallThreshold {
 							debugMsg("FFMPEG_MONITOR", fmt.Sprintf("No frame writes for %v (startup was %v ago) - FFmpeg may be stalled",
 								timeSinceLastWrite, time.Since(m.startTime)))
+							if m.isRestarting { return }
 							m.triggerEmergencyShutdown("write stall detected")
 							return
 						}
@@ -1769,6 +1776,7 @@ func (m *FFmpegManager) monitor() {
 						// If last write had an error, FFmpeg is likely dead
 						if lastWriteErr != nil && time.Since(lastWriteCheck) > 1*time.Second {
 							debugMsg("FFMPEG_MONITOR", fmt.Sprintf("Recent write error detected: %v", lastWriteErr))
+							if m.isRestarting { return }
 							m.triggerEmergencyShutdown("write error detected")
 							return
 						}
@@ -1807,8 +1815,89 @@ func (m *FFmpegManager) monitor() {
 		exitReason = "unknown exit"
 	}
 
-	// Trigger shutdown
+	// Try restart instead of emergency shutdown
+	now := time.Now()
+	if time.Since(m.lastRestartTime) > 60*time.Second {
+		m.restartCount = 0
+	}
+	if m.restartCount < 3 {
+		m.restartCount++
+		m.lastRestartTime = now
+		debugMsg("FFMPEG_RESTART", fmt.Sprintf("FFmpeg died (%s) - attempting restart %d/3...", exitReason, m.restartCount))
+		if err := m.restartFFmpeg(); err != nil {
+			debugMsg("FFMPEG_RESTART", fmt.Sprintf("Restart failed: %v - falling back to emergency shutdown", err))
+			m.triggerEmergencyShutdown("restart failed: " + err.Error())
+		}
+		return
+	}
+	debugMsg("FFMPEG_RESTART", fmt.Sprintf("Too many restarts (%d in 60s) - emergency shutdown", m.restartCount))
 	m.triggerEmergencyShutdown(exitReason)
+}
+
+// restartFFmpeg stops the current FFmpeg and starts a new one without killing the process
+func (m *FFmpegManager) restartFFmpeg() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.isRestarting = true
+	defer func() { m.isRestarting = false }()
+
+	debugMsg("FFMPEG_RESTART", "Stopping old FFmpeg process...")
+
+	// Kill old process
+	if m.cmd != nil && m.cmd.Process != nil {
+		if m.pgid != 0 {
+			syscall.Kill(-m.pgid, syscall.SIGKILL)
+		}
+		m.cmd.Process.Kill()
+		m.cmd.Wait()
+	}
+
+	// Create new FFmpeg command
+	m.cmd = setupFFmpeg(m.pictureSize)
+	stdin, err := m.cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("could not get FFmpeg stdin: %v", err)
+	}
+	m.stdinPipe = stdin
+	m.stdin = bufio.NewWriterSize(stdin, 48*1024*1024)
+
+	stdout, _ := m.cmd.StdoutPipe()
+	stderr, _ := m.cmd.StderrPipe()
+
+	m.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+
+	if err := m.cmd.Start(); err != nil {
+		return fmt.Errorf("could not start FFmpeg: %v", err)
+	}
+	m.pgid = m.cmd.Process.Pid
+
+	now := time.Now()
+	m.startTime = now
+	m.debugMu.Lock()
+	m.lastFrameTime = now
+	m.lastFlushTime = now
+	m.lastWriteError = nil
+	m.debugMu.Unlock()
+
+	debugMsg("FFMPEG_RESTART", fmt.Sprintf("New FFmpeg started (PID: %d)", m.cmd.Process.Pid))
+
+	// Start output readers
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() { debugMsg("FFMPEG_STDOUT", scanner.Text()) }
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() { debugMsg("FFMPEG_STDERR", scanner.Text()) }
+	}()
+
+	// Start new monitor
+	go m.monitor()
+
+	return nil
 }
 
 // triggerEmergencyShutdown handles the emergency shutdown process
@@ -4663,28 +4752,11 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 					debugMsg("FFMPEG_ERROR", fmt.Sprintf("Error details: %T - %v", err, err))
 					debugMsg("FFMPEG_ERROR", "This indicates FFmpeg has crashed or stdin pipe is broken")
 					debugMsg("FFMPEG_ERROR", fmt.Sprintf("Frame size: %d bytes", requiredSize))
-					debugMsg("FFMPEG_ERROR", "Triggering emergency shutdown from stdin write failure")
+					debugMsg("FFMPEG_ERROR", "Stdin write failed - FFmpeg manager will handle restart")
 
 					frameToWrite.Close()
 					trackMatClose("buffer")
-
-					// Signal FFmpeg failure immediately
-					ffmpegManager.Stop()
-
-					// Kill any remaining FFmpeg processes
-					exec.Command("pkill", "-9", "ffmpeg").Run()
-
-					// Give a moment for cleanup
-					time.Sleep(100 * time.Millisecond)
-
-					// Force exit with FFmpeg error code - multiple attempts for reliability
-					debugMsg("FFMPEG_STDIN_ERROR", "Force exiting application with code 3 (stdin write failure)")
-					go func() {
-						time.Sleep(50 * time.Millisecond)
-						debugMsg("FFMPEG_STDIN_ERROR", "Secondary exit attempt from stdin error")
-						os.Exit(3)
-					}()
-					os.Exit(3)
+					continue
 				}
 
 				stats.UpdateWrite(writeTime)
