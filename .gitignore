@@ -48,4 +48,82 @@ logs/
 
 # Temporary files
 tmp/
-temp/ 
+temp/
+
+# YouTube API credentials (keep on production server only)
+youtube-reset/client_secret.json
+youtube-reset/token.json
+youtube-reset/config.json
+youtube-reset/youtube-reset
+
+# YouTube Chat Bot credentials and binary
+youtube-chat/client_secret.json
+youtube-chat/token.json
+youtube-chat/gchat
+youtube-chat/river_data_check.go
+
+# Recorder binary and recordings
+recorder/recorder
+recordings/
+
+# PyTorch weights (large, use ONNX exports instead)
+*.pt
+# AI context files (private project notes, not for public repo)
+CONTEXT.md
+MRC-status.md
+
+# Planning docs (contain credentials and private context)
+planning/
+
+# Broadcast configs (contain stream keys and camera passwords)
+broadcast/broadcast_config_nvidia.json
+broadcast/broadcast_config_nvidia_nodrawtext.json
+broadcast/broadcast_config.json
+broadcast/broadcast_config_darwin.json
+broadcast/broadcast
+broadcast/broadcast_with_flag
+broadcast/music_mix.aac
+broadcast/track.aac
+broadcast/track.wav
+broadcast/run.sh
+
+# Scanning patterns (deployment-specific)
+scanning/
+
+# Sunrise (contains music files and published videos)
+sunrise/
+clipper/
+
+# Backup binaries
+*.backup
+*.old
+*.new
+*.prev
+NOLO.v3backup
+rollback-v3.sh
+
+# Startup scripts (contain credentials in systemd references)
+start-broadcast.sh
+start-nolo.sh
+
+# Credential directories
+youtube-reset/credentials/
+
+# External keys (NEVER commit)
+keys/*.txt
+keys/*.json
+keys/*.key
+keys/*.pem
+
+# Build test artifacts
+NOLO.bad
+NOLO.fixed
+NOLO.go.pre-fix
+*.pre-fix
+
+# Survey data (deployment-specific analysis)
+survey-data/
+survey/
+
+# Test scripts (contain camera credentials)
+scripts/

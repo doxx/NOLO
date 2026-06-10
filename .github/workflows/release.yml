@@ -1,0 +1,106 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # youtube-chat
+          - module: youtube-chat
+            binary: gchat
+          # recorder
+          - module: recorder
+            binary: recorder
+          # youtube-reset
+          - module: youtube-reset
+            binary: youtube-reset
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build ${{ matrix.binary }} (Linux amd64)
+        working-directory: ${{ matrix.module }}
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -ldflags="-s -w" -o ../dist/${{ matrix.binary }}_linux_amd64 .
+
+      - name: Build ${{ matrix.binary }} (Linux arm64)
+        working-directory: ${{ matrix.module }}
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: arm64
+        run: go build -ldflags="-s -w" -o ../dist/${{ matrix.binary }}_linux_arm64 .
+
+      - name: Build ${{ matrix.binary }} (macOS amd64)
+        working-directory: ${{ matrix.module }}
+        env:
+          CGO_ENABLED: '0'
+          GOOS: darwin
+          GOARCH: amd64
+        run: go build -ldflags="-s -w" -o ../dist/${{ matrix.binary }}_darwin_amd64 .
+
+      - name: Build ${{ matrix.binary }} (macOS arm64)
+        working-directory: ${{ matrix.module }}
+        env:
+          CGO_ENABLED: '0'
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build -ldflags="-s -w" -o ../dist/${{ matrix.binary }}_darwin_arm64 .
+
+      - name: Build ${{ matrix.binary }} (Windows amd64)
+        working-directory: ${{ matrix.module }}
+        env:
+          CGO_ENABLED: '0'
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -ldflags="-s -w" -o ../dist/${{ matrix.binary }}_windows_amd64.exe .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}-binaries
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum * > checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false

@@ -1,0 +1,9 @@
+# Ignore all key files
+*.txt
+*.json
+*.key
+*.pem
+
+# But track the README and this gitignore
+!README.md
+!.gitignore

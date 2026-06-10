@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"image"
@@ -10,6 +11,7 @@ import (
 	"io/ioutil"
 	"math"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -45,11 +47,18 @@ var (
 	debugVerbose         = flag.Bool("debug-verbose", false, "Enable verbose debug output (includes detailed YOLO, calibration, and tracking calculations)")
 	exitOnFirstTrack     = flag.Bool("exit-on-first-track", false, "Exit after first successful target lock (useful for debugging single track sessions)")
 	pipZoomEnabled       = flag.Bool("pip", false, "Enable Picture-in-Picture zoom display of locked targets")
+	yoloModel            = flag.String("yolo-model", "v3-tiny", "YOLO model to use: 'v3-tiny' (default) or 'v8n'\n\t\tv3-tiny: YOLOv3-tiny with 832x832 input (legacy)\n\t\tv8n: YOLOv8-nano with 640x640 input (recommended, higher accuracy)")
+	yoloModelPath        = flag.String("yolo-model-path", "", "Custom path to YOLO model file (overrides -yolo-model default paths)")
 	yoloDebug            = flag.Bool("YOLOdebug", false, "Save YOLO input blob images to /tmp/YOLOdebug/ for analysis")
 	yoloOverlay          = flag.Bool("yolo-overlay", false, "Show all raw YOLO detections as bounding boxes (useful for debugging P1 'all' mode)")
 	targetDisplayTracked = flag.Bool("target-display-tracked", false, "Only show military target information on the tracked P1 target, not all detected P1 objects")
 	p1MinConfidence      = flag.Float64("p1-min-confidence", 0.25, "Minimum confidence threshold for P1 targets (boats) (0.0-1.0, default: 0.25)\n\t\tExample: -p1-min-confidence=0.30 for less sensitive boat detection")
 	p2MinConfidence      = flag.Float64("p2-min-confidence", 0.15, "Minimum confidence threshold for P2 targets (people) (0.0-1.0, default: 0.15)\n\t\tExample: -p2-min-confidence=0.20 for less sensitive person detection")
+
+	// API control
+	apiPort          = flag.String("api-port", "8080", "HTTP API port for external control (chat bot, etc.)")
+	overrideDuration = flag.Int("override-duration", 15, "Seconds to hold manual override per command (default: 15)")
+	overrideStay     = flag.Int("override-stay", 30, "Seconds to hold manual override for #stay/#linger (default: 30)")
 
 	// JPEG frame saving configuration
 	jpgPath        = flag.String("jpg-path", "", "Directory path for saving JPEG frames (required when using JPEG flags)")
@@ -111,6 +120,10 @@ var (
 	// Global confidence thresholds (configurable via P1/P2 confidence flags)
 	globalP1MinConfidence float64
 	globalP2MinConfidence float64
+
+	// Global YOLO model configuration
+	globalYOLOInputSize int    // 832 for v3-tiny, 640 for v8n
+	globalYOLOModelType string // "v3-tiny" or "v8n"
 )
 
 // debugMsg is the global convenience function for unified debug logging
@@ -1717,7 +1730,7 @@ func (m *FFmpegManager) monitor() {
 		defer ticker.Stop()
 
 		lastWriteCheck := time.Now()
-		writeStallThreshold := 5 * time.Second
+		writeStallThreshold := 15 * time.Second
 
 		for {
 			select {
@@ -2326,6 +2339,24 @@ func saveJpegFrame(frame gocv.Mat, directory, prefix string, detectionCount int)
 	}
 }
 
+// getDefaultCOCONames returns the standard COCO 80-class names (used when coco.names file not available)
+func getDefaultCOCONames() []string {
+	return []string{
+		"person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck",
+		"boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+		"bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+		"giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+		"skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+		"skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+		"fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+		"broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "sofa",
+		"pottedplant", "bed", "diningtable", "toilet", "tvmonitor", "laptop", "mouse",
+		"remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+		"refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+		"hair drier", "toothbrush",
+	}
+}
+
 // isP1Object checks if an object class is a P1 (primary tracking) target
 func isP1Object(className string) bool {
 	// If P1 is set to "all", any object is P1
@@ -2361,6 +2392,294 @@ func isP2Object(className string) bool {
 		}
 	}
 	return false
+}
+
+// OverlayState tracks which overlays were toggled by API (for auto-restore)
+type OverlayState struct {
+	mu              sync.Mutex
+	statusOverlay   *bool
+	targetOverlay   *bool
+	terminalOverlay *bool
+	pipZoom         *bool
+	debugMode       *bool
+	// Original values before API toggled them
+	origStatus   bool
+	origTarget   bool
+	origTerminal bool
+	origPip      bool
+	origDebug    bool
+	// Track if API changed each one
+	apiChangedStatus   bool
+	apiChangedTarget   bool
+	apiChangedTerminal bool
+	apiChangedPip      bool
+	apiChangedDebug    bool
+}
+
+func (os *OverlayState) Toggle(name string, enabled bool) bool {
+	os.mu.Lock()
+	defer os.mu.Unlock()
+
+	switch name {
+	case "target":
+		if !os.apiChangedTarget {
+			os.origTarget = *os.targetOverlay
+			os.apiChangedTarget = true
+		}
+		*os.targetOverlay = enabled
+	case "console", "terminal":
+		if !os.apiChangedTerminal {
+			os.origTerminal = *os.terminalOverlay
+			os.apiChangedTerminal = true
+		}
+		*os.terminalOverlay = enabled
+	case "status":
+		if !os.apiChangedStatus {
+			os.origStatus = *os.statusOverlay
+			os.apiChangedStatus = true
+		}
+		*os.statusOverlay = enabled
+	case "pip":
+		if !os.apiChangedPip {
+			os.origPip = *os.pipZoom
+			os.apiChangedPip = true
+		}
+		*os.pipZoom = enabled
+	default:
+		return false
+	}
+	return true
+}
+
+func (os *OverlayState) RestoreAll() {
+	os.mu.Lock()
+	defer os.mu.Unlock()
+
+	if os.apiChangedStatus {
+		*os.statusOverlay = os.origStatus
+		os.apiChangedStatus = false
+	}
+	if os.apiChangedTarget {
+		*os.targetOverlay = os.origTarget
+		os.apiChangedTarget = false
+	}
+	if os.apiChangedTerminal {
+		*os.terminalOverlay = os.origTerminal
+		os.apiChangedTerminal = false
+	}
+	if os.apiChangedPip {
+		*os.pipZoom = os.origPip
+		os.apiChangedPip = false
+	}
+	debugMsg("API", "Overlays restored to original state")
+}
+
+// startAPIServer starts the HTTP API for external control (chat bot, etc.)
+func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration, overlays *OverlayState) {
+	mux := http.NewServeMux()
+
+	defaultOverride := time.Duration(*overrideDuration) * time.Second
+	stayOverride := time.Duration(*overrideStay) * time.Second
+
+	// Watchdog: restore overlays when override expires
+	go func() {
+		wasActive := false
+		for {
+			time.Sleep(1 * time.Second)
+			isActive := csm.IsManualOverrideActive()
+			if wasActive && !isActive {
+				overlays.RestoreAll()
+				debugMsg("API", "Manual override expired - AI tracking resumed")
+			}
+			wasActive = isActive
+		}
+	}()
+
+	// Helper: send a PTZ command with manual override
+	sendPTZ := func(w http.ResponseWriter, pan, tilt, zoom *float64, reason string, overrideDur time.Duration) {
+		csm.SetManualOverride(time.Now().Add(overrideDur))
+
+		cmd := ptz.PTZCommand{
+			Command:      "absolutePosition",
+			Reason:       reason,
+			Duration:     2 * time.Second,
+			AbsolutePan:  pan,
+			AbsoluteTilt: tilt,
+			AbsoluteZoom: zoom,
+		}
+		success := csm.SendManualCommand(cmd)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":                 success,
+			"command":            reason,
+			"override_remaining": csm.ManualOverrideRemaining(),
+		})
+	}
+
+	// Helper: get current position and apply relative move
+	relativeMove := func(w http.ResponseWriter, r *http.Request, panDelta, tiltDelta, zoomDelta float64, reason string) {
+		pos := si.GetPTZController().GetCurrentPosition()
+		newPan := pos.Pan + panDelta
+		newTilt := pos.Tilt + tiltDelta
+		newZoom := pos.Zoom + zoomDelta
+		sendPTZ(w, &newPan, &newTilt, &newZoom,
+			fmt.Sprintf("API: %s", reason), defaultOverride)
+	}
+
+	// Movement commands
+	mux.HandleFunc("/ptz/up", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 0, -30, 0, "up")
+	})
+	mux.HandleFunc("/ptz/down", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 0, 30, 0, "down")
+	})
+	mux.HandleFunc("/ptz/left", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, -80, 0, 0, "left")
+	})
+	mux.HandleFunc("/ptz/right", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 80, 0, 0, "right")
+	})
+
+	// Zoom commands
+	mux.HandleFunc("/ptz/zoomin", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 0, 0, 10, "zoomin")
+	})
+	mux.HandleFunc("/ptz/zoomout", func(w http.ResponseWriter, r *http.Request) {
+		relativeMove(w, r, 0, 0, -10, "zoomout")
+	})
+	mux.HandleFunc("/ptz/zoomfull", func(w http.ResponseWriter, r *http.Request) {
+		pos := si.GetPTZController().GetCurrentPosition()
+		newZoom := 120.0
+		sendPTZ(w, &pos.Pan, &pos.Tilt, &newZoom, "API: zoomfull", defaultOverride)
+	})
+	mux.HandleFunc("/ptz/zoommid", func(w http.ResponseWriter, r *http.Request) {
+		pos := si.GetPTZController().GetCurrentPosition()
+		newZoom := 60.0
+		sendPTZ(w, &pos.Pan, &pos.Tilt, &newZoom, "API: zoommid", defaultOverride)
+	})
+	mux.HandleFunc("/ptz/zoom/", func(w http.ResponseWriter, r *http.Request) {
+		levelStr := strings.TrimPrefix(r.URL.Path, "/ptz/zoom/")
+		level, err := strconv.Atoi(levelStr)
+		if err != nil || level < 1 || level > 10 {
+			http.Error(w, "zoom level must be 1-10", 400)
+			return
+		}
+		pos := si.GetPTZController().GetCurrentPosition()
+		newZoom := float64(10 + (level-1)*((120-10)/9))
+		sendPTZ(w, &pos.Pan, &pos.Tilt, &newZoom,
+			fmt.Sprintf("API: zoom%d", level), defaultOverride)
+	})
+
+	// Preset commands
+	mux.HandleFunc("/ptz/preset/", func(w http.ResponseWriter, r *http.Request) {
+		presetName := strings.TrimPrefix(r.URL.Path, "/ptz/preset/")
+		// Load presets from scanning.json
+		presets := map[string]ptz.PTZPosition{
+			"bridge1": {Pan: 2377, Tilt: 130, Zoom: 10},
+			"bridge2": {Pan: 2192, Tilt: 270, Zoom: 17},
+			"bridge3": {Pan: 2052, Tilt: 349, Zoom: 10},
+			"river":   {Pan: 1152, Tilt: 205, Zoom: 10},
+			"river1":  {Pan: 1152, Tilt: 205, Zoom: 10},
+			"river2":  {Pan: 1007, Tilt: 97, Zoom: 29},
+		}
+		pos, ok := presets[presetName]
+		if !ok {
+			http.Error(w, "unknown preset: "+presetName, 404)
+			return
+		}
+		sendPTZ(w, &pos.Pan, &pos.Tilt, &pos.Zoom,
+			fmt.Sprintf("API: preset %s", presetName), defaultOverride)
+	})
+
+	// Stay/linger - extend override without moving
+	mux.HandleFunc("/ptz/stay", func(w http.ResponseWriter, r *http.Request) {
+		csm.SetManualOverride(time.Now().Add(stayOverride))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":                 true,
+			"command":            "stay",
+			"override_remaining": csm.ManualOverrideRemaining(),
+		})
+	})
+
+	// Release - cancel override immediately
+	mux.HandleFunc("/ptz/release", func(w http.ResponseWriter, r *http.Request) {
+		csm.ClearManualOverride()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"command": "release",
+		})
+	})
+
+	// Overlay toggle commands: /show/target, /show/console, /show/pip, /show/status
+	mux.HandleFunc("/show/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/show/")
+		if name == "" {
+			http.Error(w, "usage: /show/{target|console|pip|status}", 400)
+			return
+		}
+		ok := overlays.Toggle(name, true)
+		if !ok {
+			http.Error(w, "unknown overlay: "+name+". Options: target, console, pip, status", 404)
+			return
+		}
+		debugMsg("API", fmt.Sprintf("Overlay '%s' enabled via API", name))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"overlay": name,
+			"enabled": true,
+		})
+	})
+
+	// Hide overlays: /hide/target, /hide/console, /hide/pip, /hide/status
+	mux.HandleFunc("/hide/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/hide/")
+		if name == "" {
+			http.Error(w, "usage: /hide/{target|console|pip|status}", 400)
+			return
+		}
+		ok := overlays.Toggle(name, false)
+		if !ok {
+			http.Error(w, "unknown overlay: "+name, 404)
+			return
+		}
+		debugMsg("API", fmt.Sprintf("Overlay '%s' disabled via API", name))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"overlay": name,
+			"enabled": false,
+		})
+	})
+
+	// Status endpoint
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		pos := si.GetPTZController().GetCurrentPosition()
+		mode := si.GetTrackingMode()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"mode":               mode,
+			"pan":                pos.Pan,
+			"tilt":               pos.Tilt,
+			"zoom":               pos.Zoom,
+			"override_active":    csm.IsManualOverrideActive(),
+			"override_remaining": csm.ManualOverrideRemaining(),
+			"overlays": map[string]bool{
+				"target":   *overlays.targetOverlay,
+				"console":  *overlays.terminalOverlay,
+				"status":   *overlays.statusOverlay,
+				"pip":      *overlays.pipZoom,
+			},
+		})
+	})
+
+	addr := "127.0.0.1:" + *apiPort
+	debugMsg("API", fmt.Sprintf("HTTP API server starting on %s", addr))
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		debugMsg("API_ERROR", fmt.Sprintf("HTTP API server failed: %v", err))
+	}
 }
 
 func main() {
@@ -2692,6 +3011,16 @@ func main() {
 	// Pass camera state manager to tracking system
 	spatialIntegration.SetCameraStateManager(cameraStateManager)
 
+	// Start HTTP API server for external control (chat bot, web UI, etc.)
+	overlayState := &OverlayState{
+		statusOverlay:   statusOverlay,
+		targetOverlay:   targetOverlay,
+		terminalOverlay: terminalOverlay,
+		pipZoom:         pipZoomEnabled,
+		debugMode:       debugMode,
+	}
+	go startAPIServer(cameraStateManager, spatialIntegration, overlayState)
+
 	// Move to the first river scanning position on startup using state manager
 	debugMsg("PTZ_DEBUG", "Moving to initial river scanning position")
 	debugMsg("CAMERA_STATE", fmt.Sprintf("Initial state: %s", cameraStateManager.GetStateInfo()))
@@ -2756,23 +3085,51 @@ func main() {
 		os.Exit(1)
 	}()
 
-	debugMsg("DEBUG", "Loading YOLOv3-tiny model...")
-	net := gocv.ReadNet("yolov3-tiny.weights", "yolov3-tiny.cfg")
+	// Configure YOLO model based on flags
+	globalYOLOModelType = *yoloModel
+	var net gocv.Net
+
+	switch globalYOLOModelType {
+	case "v8n", "v8", "yolov8n", "yolov8":
+		globalYOLOModelType = "v8n"
+		globalYOLOInputSize = 640
+		modelPath := "models/yolov8n.onnx"
+		if *yoloModelPath != "" {
+			modelPath = *yoloModelPath
+		}
+		debugMsg("DEBUG", fmt.Sprintf("Loading YOLOv8n model from %s (input: %dx%d)...", modelPath, globalYOLOInputSize, globalYOLOInputSize))
+		net = gocv.ReadNetFromONNX(modelPath)
+		if net.Empty() {
+			debugMsg("ERROR", fmt.Sprintf("Failed to load YOLOv8n model from %s", modelPath))
+			return
+		}
+	default:
+		globalYOLOModelType = "v3-tiny"
+		globalYOLOInputSize = 832
+		weightsPath := "yolov3-tiny.weights"
+		cfgPath := "yolov3-tiny.cfg"
+		if *yoloModelPath != "" {
+			weightsPath = *yoloModelPath
+			cfgPath = strings.Replace(*yoloModelPath, ".weights", ".cfg", 1)
+		}
+		debugMsg("DEBUG", fmt.Sprintf("Loading YOLOv3-tiny model (input: %dx%d)...", globalYOLOInputSize, globalYOLOInputSize))
+		net = gocv.ReadNet(weightsPath, cfgPath)
+	}
 
 	// Auto-detect best available backend
 	if setupGPUBackend(&net) {
-		debugMsg("DEBUG", "Model loaded with GPU acceleration (CUDA + cuDNN).")
+		debugMsg("DEBUG", fmt.Sprintf("Model loaded with GPU acceleration (CUDA + cuDNN). Model: %s", globalYOLOModelType))
 	} else {
-		debugMsg("DEBUG", "Model loaded with CPU (GPU not available or failed).")
+		debugMsg("DEBUG", fmt.Sprintf("Model loaded with CPU (GPU not available or failed). Model: %s", globalYOLOModelType))
 	}
 
-	// Load class names
+	// Load class names (both models use COCO 80 classes)
+	classNames := getDefaultCOCONames()
+	// Try loading from file first (overrides defaults)
 	namesBytes, err := ioutil.ReadFile("coco.names")
-	if err != nil {
-		debugMsg("ERROR", fmt.Sprintf("Could not read coco.names: %v", err))
-		return
+	if err == nil {
+		classNames = strings.Split(string(namesBytes), "\n")
 	}
-	classNames := strings.Split(string(namesBytes), "\n")
 
 	// Create channels with larger buffers
 	frameChan := make(chan FrameData, 120) // Increased from 60 to 120
@@ -2882,20 +3239,25 @@ func setupGPUBackend(net *gocv.Net) bool {
 
 // createOptimizedBlob creates a properly letterboxed YOLO input blob
 func createOptimizedBlob(frame gocv.Mat) gocv.Mat {
-	// CRITICAL FIX: Manual letterboxing since OpenCV crop=false doesn't work properly
-	// Original frame: 2688x1520 (1.768:1) -> YOLO input: 832x832 (1:1) with letterboxing
+	// Manual letterboxing since OpenCV crop=false doesn't work properly
+	// Original frame: 2688x1520 (1.768:1) -> YOLO input: NxN (1:1) with letterboxing
+	// N = 832 for v3-tiny, 640 for v8n
 
 	originalWidth := float32(frame.Cols())  // 2688
 	originalHeight := float32(frame.Rows()) // 1520
-	yoloSize := 832
+	yoloSize := globalYOLOInputSize
 
 	// Calculate letterbox parameters to preserve aspect ratio
 	aspectRatio := originalWidth / originalHeight         // 1.768
-	contentHeight := int(float32(yoloSize) / aspectRatio) // 470px
-	yOffset := (yoloSize - contentHeight) / 2             // 181px
+	contentHeight := int(float32(yoloSize) / aspectRatio) // 470px (v3) or 362px (v8)
+	yOffset := (yoloSize - contentHeight) / 2             // 181px (v3) or 139px (v8)
 
-	// Step 1: Create 832x832 black canvas (letterbox background)
+	// Create NxN canvas with appropriate padding color
+	// v8n uses 114 (gray) padding, v3-tiny uses 0 (black) padding
 	letterboxed := gocv.NewMatWithSize(yoloSize, yoloSize, gocv.MatTypeCV8UC3)
+	if globalYOLOModelType == "v8n" {
+		letterboxed.SetTo(gocv.NewScalar(114, 114, 114, 0))
+	}
 	defer letterboxed.Close()
 	letterboxed.SetTo(gocv.NewScalar(0, 0, 0, 0)) // Fill with black
 
@@ -2920,7 +3282,7 @@ func createOptimizedBlob(frame gocv.Mat) gocv.Mat {
 
 	// Step 4: Create blob from properly letterboxed and masked image
 	// Now we can use crop=true since the image is already properly formatted
-	blob := gocv.BlobFromImage(maskedLetterboxed, 1.0/255.0, image.Pt(832, 832), gocv.NewScalar(0, 0, 0, 0), true, true)
+	blob := gocv.BlobFromImage(maskedLetterboxed, 1.0/255.0, image.Pt(yoloSize, yoloSize), gocv.NewScalar(0, 0, 0, 0), true, false)
 
 	return blob
 }
@@ -3028,8 +3390,8 @@ func saveYOLOBlobDebug(blob gocv.Mat, frameCounter int64) {
 	}
 
 	// Convert blob back to image format for visualization
-	// The blob is in format: [1, 3, 832, 832] (batch, channels, height, width)
-	// We need to convert it back to [832, 832, 3] (height, width, channels) for saving
+	sz := globalYOLOInputSize
+	// The blob is in format: [1, 3, sz, sz] (batch, channels, height, width)
 
 	// Extract the data from the blob
 	blobData, err := blob.DataPtrFloat32()
@@ -3039,18 +3401,17 @@ func saveYOLOBlobDebug(blob gocv.Mat, frameCounter int64) {
 	}
 
 	// Create output image
-	outputImage := gocv.NewMatWithSize(832, 832, gocv.MatTypeCV8UC3)
+	outputImage := gocv.NewMatWithSize(sz, sz, gocv.MatTypeCV8UC3)
 	defer outputImage.Close()
 
 	// Convert blob data back to image format
-	// Blob format: [batch=1, channels=3, height=832, width=832]
 	// The data is normalized (0-1), so we need to scale back to 0-255
-	for y := 0; y < 832; y++ {
-		for x := 0; x < 832; x++ {
+	for y := 0; y < sz; y++ {
+		for x := 0; x < sz; x++ {
 			// Calculate blob indices for RGB channels
-			rIndex := (0*3+0)*832*832 + y*832 + x // Red channel
-			gIndex := (0*3+1)*832*832 + y*832 + x // Green channel
-			bIndex := (0*3+2)*832*832 + y*832 + x // Blue channel
+			rIndex := (0*3+0)*sz*sz + y*sz + x // Red channel
+			gIndex := (0*3+1)*sz*sz + y*sz + x // Green channel
+			bIndex := (0*3+2)*sz*sz + y*sz + x // Blue channel
 
 			// Get normalized values and convert back to 0-255 range
 			r := uint8(blobData[rIndex] * 255.0)
@@ -3088,8 +3449,12 @@ func testGPUInference(net *gocv.Net) (success bool) {
 	// CRITICAL FIX: Add small delay to ensure CUDA driver is ready
 	fmt.Println("[GPU_DETECT] Allowing CUDA driver to stabilize...")
 	time.Sleep(100 * time.Millisecond)
-	testBlob := gocv.BlobFromImage(gocv.NewMatWithSize(832, 832, gocv.MatTypeCV8UC3), 1.0/255.0,
-		image.Pt(832, 832), gocv.NewScalar(0, 0, 0, 0), true, false)
+	testSize := globalYOLOInputSize
+	if testSize == 0 {
+		testSize = 832 // Fallback if called before init
+	}
+	testBlob := gocv.BlobFromImage(gocv.NewMatWithSize(testSize, testSize, gocv.MatTypeCV8UC3), 1.0/255.0,
+		image.Pt(testSize, testSize), gocv.NewScalar(0, 0, 0, 0), true, false)
 	defer testBlob.Close()
 
 	// Try a forward pass to test if GPU actually works
@@ -3521,159 +3886,237 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 					var allRawClassNames []string
 					var allRawConfidences []float64
 
-					// Process YOLO output and draw all detections
-					for i := 0; i < output.Rows(); i++ {
-						row := output.RowRange(i, i+1)
-						trackMatAlloc("yolo")
-						data := row.Clone()
-						trackMatAlloc("yolo")
-						scores := data.ColRange(5, data.Cols())
-						trackMatAlloc("yolo")
-						_, maxVal, _, maxLoc := gocv.MinMaxLoc(scores)
-						classID := maxLoc.X
-						confidence := maxVal
-						className := ""
-						if classID < len(classNames) {
-							className = classNames[classID]
-						}
+					// Common letterbox parameters for coordinate transformation
+					originalWidth := float32(frame.Cols())
+					originalHeight := float32(frame.Rows())
+					yoloSizeF := float32(globalYOLOInputSize)
+					aspectRatio := originalWidth / originalHeight
+					contentHeight := yoloSizeF / aspectRatio
+					yOffsetF := (yoloSizeF - contentHeight) / 2.0
+					scaleX := originalWidth / yoloSizeF
+					scaleY := originalHeight / contentHeight
 
-						// Calculate detection rectangle FIRST (for raw YOLO overlay)
-						// PROPER LETTERBOX COORDINATE TRANSFORMATION
-						// Original frame: 2688x1520 (1.768:1), YOLO input: 832x832 (1:1)
-						// Letterboxing adds black bars on top/bottom to preserve aspect ratio
-
-						originalWidth := float32(frame.Cols())  // 2688
-						originalHeight := float32(frame.Rows()) // 1520
-						yoloSize := float32(832)                // 832x832 YOLO input
-
-						// Calculate letterbox parameters
-						aspectRatio := originalWidth / originalHeight // 1.768
-						contentHeight := yoloSize / aspectRatio       // 470px (actual content height)
-						yOffset := (yoloSize - contentHeight) / 2     // 181px (black bar offset)
-
-						// STEP 1: Get normalized YOLO coordinates (0.0-1.0)
-						xNorm := data.GetFloatAt(0, 0)
-						yNorm := data.GetFloatAt(0, 1)
-						wNorm := data.GetFloatAt(0, 2)
-						hNorm := data.GetFloatAt(0, 3)
-
-						// STEP 2: Convert to 832x832 pixel coordinates
-						xPixel832 := xNorm * yoloSize // 0-832 pixel coordinate in letterboxed space
-						yPixel832 := yNorm * yoloSize // 0-832 pixel coordinate in letterboxed space
-						wPixel832 := wNorm * yoloSize // width in letterboxed space
-						hPixel832 := hNorm * yoloSize // height in letterboxed space
-
-						// STEP 3: Remove letterbox offset from Y coordinate to get content-area coordinate
-						yContentPixel := yPixel832 - yOffset // Y coordinate within 470px content area
-
-						// STEP 4: Scale to original frame dimensions
-						centerX := int(xPixel832 * (originalWidth / yoloSize))           // Scale X directly
-						centerY := int(yContentPixel * (originalHeight / contentHeight)) // Scale Y from content area
-						width := int(wPixel832 * (originalWidth / yoloSize))
-						height := int(hPixel832 * (originalHeight / contentHeight))
-						left := centerX - width/2
-						top := centerY - height/2
-						rect := image.Rect(left, top, left+width, top+height)
-
-						// Store raw detection for YOLO overlay (before any filtering)
-						if confidence > 0.1 { // Only store detections with minimal confidence to avoid noise
-							allRawDetections = append(allRawDetections, rect)
-							allRawClassNames = append(allRawClassNames, className)
-							allRawConfidences = append(allRawConfidences, float64(confidence))
-						}
-
-						// DYNAMIC FILTERING: Use configurable P1/P2 tracking priorities with separate confidence thresholds
-						validClass := false
-						var minConfidenceThreshold float64
-
-						if isP1Object(className) {
-							// P1 objects (primary tracking targets) use P1 confidence threshold
-							validClass = true
-							minConfidenceThreshold = globalP1MinConfidence
-						} else if isP2Object(className) {
-							// P2 objects (enhancement objects) use P2 confidence threshold and require tracking mode
-							if spatialIntegration.GetCurrentMode() == tracking.ModeTracking {
-								validClass = true
-								minConfidenceThreshold = globalP2MinConfidence
-							}
+					// Parse detections based on model type
+					if globalYOLOModelType == "v8n" {
+						// === YOLOv8 OUTPUT PARSING ===
+						// Output shape: [1, 84, 8400] - need to reshape to [84, 8400]
+						// Row = field (0-3: x,y,w,h  4-83: class scores), Col = detection candidate
+						outputSize := output.Size()
+						if len(outputSize) < 3 {
+							debugMsg("YOLO_ERROR", fmt.Sprintf("Unexpected v8 output shape: %v", outputSize))
 						} else {
-							// Ignore all other classes not in P1 or P2 lists
-							validClass = false
-							minConfidenceThreshold = 1.0 // Set impossible threshold to ensure rejection
+							numFields := outputSize[1]     // 84
+							numDetections := outputSize[2] // 8400
+							data2D := output.Reshape(1, numFields)
+							defer data2D.Close()
+
+							// PERFORMANCE: Bulk read entire tensor in one CGO call
+							// instead of per-element GetFloatAt (was 705K CGO calls/frame)
+							rawData, rawErr := data2D.DataPtrFloat32()
+							if rawErr != nil {
+								debugMsg("YOLO_ERROR", fmt.Sprintf("Failed to get v8n tensor data: %v", rawErr))
+							}
+
+							// Collect candidates for NMS
+							var nmsBoxes []image.Rectangle
+							var nmsConfidences []float32
+							var nmsClassIDs []int
+							var nmsClassNames []string
+
+							stride := numDetections // row-major: data[field * stride + detection]
+							for i := 0; i < numDetections && rawErr == nil; i++ {
+								var maxScore float32
+								var maxClassID int
+								for c := 0; c < 80; c++ {
+									score := rawData[(c+4)*stride+i]
+									if score > maxScore {
+										maxScore = score
+										maxClassID = c
+									}
+								}
+
+								className := ""
+								if maxClassID < len(classNames) {
+									className = classNames[maxClassID]
+								}
+
+								// v8 coordinates are in input pixel space (0-640)
+								cx := float64(rawData[0*stride+i])
+								cy := float64(rawData[1*stride+i])
+								w := float64(rawData[2*stride+i])
+								h := float64(rawData[3*stride+i])
+
+								// Transform from letterboxed input space to original frame coordinates
+								origX := cx * float64(scaleX)
+								origY := (cy - float64(yOffsetF)) * float64(scaleY)
+								origW := w * float64(scaleX)
+								origH := h * float64(scaleY)
+
+								left := int(origX - origW/2)
+								top := int(origY - origH/2)
+								width := int(origW)
+								height := int(origH)
+
+								// Clamp to frame
+								if left < 0 { left = 0 }
+								if top < 0 { top = 0 }
+								if left+width > int(originalWidth) { width = int(originalWidth) - left }
+								if top+height > int(originalHeight) { height = int(originalHeight) - top }
+
+								rect := image.Rect(left, top, left+width, top+height)
+
+								// Store raw detection for overlay
+								if maxScore > 0.1 {
+									allRawDetections = append(allRawDetections, rect)
+									allRawClassNames = append(allRawClassNames, className)
+									allRawConfidences = append(allRawConfidences, float64(maxScore))
+								}
+
+								// Class and confidence filtering
+								validClass := false
+								var minConfidenceThreshold float64
+								if isP1Object(className) {
+									validClass = true
+									minConfidenceThreshold = globalP1MinConfidence
+								} else if isP2Object(className) {
+									if spatialIntegration.GetCurrentMode() == tracking.ModeTracking {
+										validClass = true
+										minConfidenceThreshold = globalP2MinConfidence
+									}
+								}
+								if !validClass || float64(maxScore) < minConfidenceThreshold {
+									continue
+								}
+
+								// Size filtering
+								if width*height < 2000 {
+									continue
+								}
+								if isP1Object(className) && (width <= 50 || height <= 50) {
+									debugMsg("YOLO_FILTER", fmt.Sprintf("Rejecting small %s: %dx%d", className, width, height))
+									continue
+								}
+
+								nmsBoxes = append(nmsBoxes, rect)
+								nmsConfidences = append(nmsConfidences, maxScore)
+								nmsClassIDs = append(nmsClassIDs, maxClassID)
+								nmsClassNames = append(nmsClassNames, className)
+							}
+
+							// Apply NMS to remove overlapping detections
+							if len(nmsBoxes) > 0 {
+								nmsIndices := gocv.NMSBoxes(nmsBoxes, nmsConfidences, float32(globalP1MinConfidence), 0.45)
+								for _, idx := range nmsIndices {
+									detectionRects = append(detectionRects, nmsBoxes[idx])
+									detectionClassNames = append(detectionClassNames, nmsClassNames[idx])
+									detectionConfidences = append(detectionConfidences, float64(nmsConfidences[idx]))
+
+									debugMsgVerbose("YOLO_ACCEPT", fmt.Sprintf("%s: conf=%.2f, area=%d",
+										nmsClassNames[idx], nmsConfidences[idx], nmsBoxes[idx].Dx()*nmsBoxes[idx].Dy()))
+
+									if *yoloOverlay {
+										renderer.DrawDetection(frameToWrite, nmsBoxes[idx], nmsClassNames[idx], float64(nmsConfidences[idx]))
+									}
+								}
+							}
 						}
+					} else {
+						// === YOLOv3-tiny OUTPUT PARSING ===
+						// Output shape: [N, 85] - each row is one detection
+						// Columns: 0-3 = x,y,w,h (normalized), 4 = objectness, 5-84 = class scores
+						for i := 0; i < output.Rows(); i++ {
+							row := output.RowRange(i, i+1)
+							trackMatAlloc("yolo")
+							data := row.Clone()
+							trackMatAlloc("yolo")
+							scores := data.ColRange(5, data.Cols())
+							trackMatAlloc("yolo")
+							_, maxVal, _, maxLoc := gocv.MinMaxLoc(scores)
+							classID := maxLoc.X
+							confidence := maxVal
+							className := ""
+							if classID < len(classNames) {
+								className = classNames[classID]
+							}
 
-						// Always close Mats before any continue
-						earlyExit := false
-						if !validClass || confidence < float32(minConfidenceThreshold) {
-							earlyExit = true
+							// v3-tiny coordinates are normalized (0.0-1.0)
+							xNorm := data.GetFloatAt(0, 0)
+							yNorm := data.GetFloatAt(0, 1)
+							wNorm := data.GetFloatAt(0, 2)
+							hNorm := data.GetFloatAt(0, 3)
+
+							// Convert to input pixel space then to original frame coordinates
+							xPixel := xNorm * yoloSizeF
+							yPixel := yNorm * yoloSizeF
+							wPixel := wNorm * yoloSizeF
+							hPixel := hNorm * yoloSizeF
+
+							yContentPixel := yPixel - yOffsetF
+
+							centerX := int(xPixel * scaleX)
+							centerY := int(yContentPixel * scaleY)
+							width := int(wPixel * scaleX)
+							height := int(hPixel * scaleY)
+							left := centerX - width/2
+							top := centerY - height/2
+							rect := image.Rect(left, top, left+width, top+height)
+
+							// Store raw detection for overlay
+							if confidence > 0.1 {
+								allRawDetections = append(allRawDetections, rect)
+								allRawClassNames = append(allRawClassNames, className)
+								allRawConfidences = append(allRawConfidences, float64(confidence))
+							}
+
+							// Class and confidence filtering
+							validClass := false
+							var minConfidenceThreshold float64
+							if isP1Object(className) {
+								validClass = true
+								minConfidenceThreshold = globalP1MinConfidence
+							} else if isP2Object(className) {
+								if spatialIntegration.GetCurrentMode() == tracking.ModeTracking {
+									validClass = true
+									minConfidenceThreshold = globalP2MinConfidence
+								}
+							}
+							if !validClass || confidence < float32(minConfidenceThreshold) {
+								scores.Close(); trackMatClose("yolo")
+								data.Close(); trackMatClose("yolo")
+								row.Close(); trackMatClose("yolo")
+								continue
+							}
+
+							// Size filtering
+							if width*height < 2000 {
+								scores.Close(); trackMatClose("yolo")
+								data.Close(); trackMatClose("yolo")
+								row.Close(); trackMatClose("yolo")
+								continue
+							}
+							if isP1Object(className) && (width <= 50 || height <= 50) {
+								debugMsg("YOLO_FILTER", fmt.Sprintf("Rejecting small %s: %dx%d", className, width, height))
+								scores.Close(); trackMatClose("yolo")
+								data.Close(); trackMatClose("yolo")
+								row.Close(); trackMatClose("yolo")
+								continue
+							}
+
+							debugMsgVerbose("YOLO_ACCEPT", fmt.Sprintf("%s: conf=%.2f, area=%d, pos=(%d,%d)",
+								className, confidence, width*height, centerX, centerY))
+
+							detectionRects = append(detectionRects, rect)
+							detectionClassNames = append(detectionClassNames, className)
+							detectionConfidences = append(detectionConfidences, float64(confidence))
+
+							if *yoloOverlay {
+								renderer.DrawDetection(frameToWrite, rect, className, float64(confidence))
+							}
+
+							scores.Close(); trackMatClose("yolo")
+							data.Close(); trackMatClose("yolo")
+							row.Close(); trackMatClose("yolo")
 						}
-						if earlyExit {
-							scores.Close()
-							trackMatClose("yolo")
-							data.Close()
-							trackMatClose("yolo")
-							row.Close()
-							trackMatClose("yolo")
-							continue
-						}
-
-						// Additional size filtering to eliminate tiny false positives
-						objectArea := width * height
-						minArea := 2000 // Minimum 2000 pixels for valid detection
-						if objectArea < minArea {
-							// Removed spam log message - this filters many detections per frame
-							scores.Close()
-							trackMatClose("yolo")
-							data.Close()
-							trackMatClose("yolo")
-							row.Close()
-							trackMatClose("yolo")
-							continue
-						}
-
-						// DYNAMIC SIZE FILTER: Reject P1 objects that are too small (configurable by object type)
-						if isP1Object(className) && (width <= 50 || height <= 50) {
-							debugMsg("YOLO_FILTER", fmt.Sprintf("Rejecting small %s: dimensions %dx%d (≤50x50 pixels)", className, width, height))
-							scores.Close()
-							trackMatClose("yolo")
-							data.Close()
-							trackMatClose("yolo")
-							row.Close()
-							trackMatClose("yolo")
-							continue
-						}
-
-						// Debug: Show accepted detections
-						debugMsgVerbose("YOLO_ACCEPT", fmt.Sprintf("%s: conf=%.2f, area=%d, pos=(%d,%d)",
-							className, confidence, objectArea, centerX, centerY))
-
-						// Debug: Show YOLO coordinate calculation for boats
-						if className == "boat" {
-							debugMsgVerbose("DEBUG", fmt.Sprintf("YOLO: Raw values: x=%.3f, y=%.3f, w=%.3f, h=%.3f",
-								data.GetFloatAt(0, 0), data.GetFloatAt(0, 1), data.GetFloatAt(0, 2), data.GetFloatAt(0, 3)))
-							debugMsgVerbose("DEBUG", fmt.Sprintf("YOLO: Frame size: %dx%d", frame.Cols(), frame.Rows()))
-							debugMsgVerbose("DEBUG", fmt.Sprintf("YOLO: Calculated center: (%d,%d), size: %dx%d",
-								centerX, centerY, width, height))
-						}
-
-						detectionRects = append(detectionRects, rect)
-						detectionClassNames = append(detectionClassNames, className)
-						detectionConfidences = append(detectionConfidences, float64(confidence))
-
-						// NOTE: Debug session creation moved to after tracking update to use consistent object IDs
-
-						// ONLY draw raw YOLO detection boxes if yolo-overlay is specifically enabled
-						// This prevents green YOLO boxes from cluttering the military targeting overlay
-						if *yoloOverlay {
-							renderer.DrawDetection(frameToWrite, rect, className, float64(confidence))
-						}
-
-						scores.Close()
-						trackMatClose("yolo")
-						data.Close()
-						trackMatClose("yolo")
-						row.Close()
-						trackMatClose("yolo")
 					}
 
 					// Draw raw YOLO detections overlay if enabled
