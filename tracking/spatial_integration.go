@@ -986,16 +986,43 @@ func (si *SpatialIntegration) updateAllBoats(detections []image.Rectangle, class
 			continue
 		}
 
-		// Survey-based expected-object validation: reject detections of objects
-		// that should not appear at this camera position according to the survey
+		// Survey-based hard rejection: completely drop detections at positions
+		// where the survey identified non-river zones (seawall, bridge, buildings, etc.)
 		if si.surveyGrid != nil && si.surveyGrid.IsLoaded() {
 			pos := si.ptzCtrl.GetCurrentPosition()
+
+			// Reject objects not expected at this position (e.g. "boat" on bridge deck)
 			if !si.surveyGrid.IsExpectedObject(pos.Pan, pos.Tilt, className) {
-				if si.frameCount%30 == 0 { // reduce log spam
-					fmt.Printf("[%s][SURVEY_REJECT] %s not expected at P%.0f T%.0f - survey says this is not a boat zone\n",
+				if si.frameCount%30 == 0 {
+					fmt.Printf("[%s][SURVEY_REJECT] %s not expected at P%.0f T%.0f\n",
 						time.Now().Format("15:04:05"), className, pos.Pan, pos.Tilt)
 				}
 				continue
+			}
+
+			// Hard reject at seawall positions - the #1 source of false positives
+			if cell := si.surveyGrid.Lookup(pos.Pan, pos.Tilt); cell != nil {
+				if cell.HasSeawall {
+					if si.frameCount%30 == 0 {
+						fmt.Printf("[%s][SEAWALL_REJECT] Dropping %s detection at seawall P%d T%d\n",
+							time.Now().Format("15:04:05"), className, cell.Pan, cell.Tilt)
+					}
+					continue
+				}
+				if cell.Exclusion || cell.HasBridge {
+					if si.frameCount%30 == 0 {
+						fmt.Printf("[%s][ZONE_REJECT] Dropping %s detection at excluded/bridge zone P%d T%d\n",
+							time.Now().Format("15:04:05"), className, cell.Pan, cell.Tilt)
+					}
+					continue
+				}
+				if !cell.HasWater && !cell.HasCorridor {
+					if si.frameCount%30 == 0 {
+						fmt.Printf("[%s][ZONE_REJECT] Dropping %s detection at non-water zone P%d T%d\n",
+							time.Now().Format("15:04:05"), className, cell.Pan, cell.Tilt)
+					}
+					continue
+				}
 			}
 		}
 
@@ -2822,41 +2849,18 @@ func (si *SpatialIntegration) calculateTargetingScore(boat *TrackedBoat) float64
 			boat.Classification, boat.ID, enhancementBonus, boat.P2Count, enhancementType), boat.ID)
 	}
 
-	// RIVER-ONLY MODE: Survey-based tracking suppression.
-	// Only track boats at positions with active boat corridors on open water.
-	// Everything else (docked marina boats, seawall, bridge, walk) gets penalized.
+	// Survey penalty removed - seawall/bridge/exclusion detections are now
+	// hard-rejected in updateAllBoats() before a TrackedBoat is ever created.
+	// No score penalty needed; bad detections never reach this function.
 	surveyPenalty := 1.0
 	if si.surveyGrid != nil && si.surveyGrid.IsLoaded() {
+		// Mild deprioritization for non-corridor water (docked areas)
 		pos := si.ptzCtrl.GetCurrentPosition()
 		if cell := si.surveyGrid.Lookup(pos.Pan, pos.Tilt); cell != nil {
-			if cell.Exclusion {
-				// Exclusion zone - never track here
-				surveyPenalty = 0.05
-				fmt.Printf("[%s][SURVEY_SUPPRESS] Exclusion zone at P%d T%d - near-zero (x0.05) for %s %s\n",
-					time.Now().Format("15:04:05"), cell.Pan, cell.Tilt, boat.Classification, boat.ID)
-			} else if cell.HasCorridor && cell.HasWater && !cell.HasSeawall {
-				// River channel with active boat traffic - full tracking
-				surveyPenalty = 1.0
-			} else if cell.HasCorridor && cell.HasSeawall {
-				// Boats move past seawall here - track but with FP caution
-				surveyPenalty = 0.6
-				si.debugMsg("RIVER_ONLY", fmt.Sprintf("Seawall+corridor at P%d T%d - moderate penalty (x0.6) for %s %s",
-					cell.Pan, cell.Tilt, boat.Classification, boat.ID), boat.ID)
-			} else if cell.HasWater && !cell.HasCorridor {
-				// Open water but no boat traffic pattern - mild suppression
+			if cell.HasWater && !cell.HasCorridor {
 				surveyPenalty = 0.7
 				si.debugMsg("RIVER_ONLY", fmt.Sprintf("Water but no corridor at P%d T%d - mild penalty (x0.7) for %s %s",
 					cell.Pan, cell.Tilt, boat.Classification, boat.ID), boat.ID)
-			} else if cell.HasSeawall && !cell.HasCorridor {
-				// Seawall with no boat traffic - heavy suppression
-				surveyPenalty = 0.15
-				fmt.Printf("[%s][RIVER_ONLY] Seawall, no corridor at P%d T%d - suppress (x0.15) %s %s\n",
-					time.Now().Format("15:04:05"), cell.Pan, cell.Tilt, boat.Classification, boat.ID)
-			} else {
-				// Marina docks, bridge, walk, buildings, vegetation - not river
-				surveyPenalty = 0.15
-				fmt.Printf("[%s][RIVER_ONLY] Non-river zone at P%d T%d - suppress (x0.15) %s %s\n",
-					time.Now().Format("15:04:05"), cell.Pan, cell.Tilt, boat.Classification, boat.ID)
 			}
 		}
 	}
