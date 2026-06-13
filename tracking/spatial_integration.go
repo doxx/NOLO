@@ -183,19 +183,32 @@ func LoadSurveyGrid(path string) *SurveyGrid {
 	return sg
 }
 
-// Lookup finds the nearest survey cell to a given PTZ position
+// Lookup finds the nearest survey cell to a given PTZ position.
+// Uses nearest-neighbor search since the survey grid has irregular spacing.
 func (sg *SurveyGrid) Lookup(pan, tilt float64) *SurveyCell {
 	if !sg.loaded || len(sg.cells) == 0 {
 		return nil
 	}
-	// Snap to nearest grid cell using step sizes
-	roundedPan := int(math.Round(pan/float64(sg.panStep))) * sg.panStep
-	roundedTilt := int(math.Round(tilt/float64(sg.tiltStep))) * sg.tiltStep
-	key := fmt.Sprintf("P%04d_T%04d", roundedPan, roundedTilt)
-	if cell, ok := sg.cells[key]; ok {
-		return cell
+
+	var bestCell *SurveyCell
+	bestDist := math.MaxFloat64
+
+	for _, cell := range sg.cells {
+		dp := pan - float64(cell.Pan)
+		dt := tilt - float64(cell.Tilt)
+		dist := dp*dp + dt*dt
+		if dist < bestDist {
+			bestDist = dist
+			bestCell = cell
+		}
 	}
-	return nil
+
+	// Only match if within reasonable distance (150 pan units, 100 tilt units)
+	if bestDist > 150*150+100*100 {
+		return nil
+	}
+
+	return bestCell
 }
 
 // IsLoaded returns whether survey data was successfully loaded
