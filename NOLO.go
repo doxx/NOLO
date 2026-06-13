@@ -55,6 +55,9 @@ var (
 	p1MinConfidence      = flag.Float64("p1-min-confidence", 0.25, "Minimum confidence threshold for P1 targets (boats) (0.0-1.0, default: 0.25)\n\t\tExample: -p1-min-confidence=0.30 for less sensitive boat detection")
 	p2MinConfidence      = flag.Float64("p2-min-confidence", 0.15, "Minimum confidence threshold for P2 targets (people) (0.0-1.0, default: 0.15)\n\t\tExample: -p2-min-confidence=0.20 for less sensitive person detection")
 
+	// Survey grid for spatial awareness (seawall suppression, expected-object validation)
+	surveyGridPath = flag.String("survey-grid", "", "Path to survey grid JSON (e.g. survey-data/grid_gpt-5.2.json) for false-positive suppression")
+
 	// API control
 	apiPort          = flag.String("api-port", "8080", "HTTP API port for external control (chat bot, etc.)")
 	overrideDuration = flag.Int("override-duration", 15, "Seconds to hold manual override per command (default: 15)")
@@ -2689,12 +2692,39 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 			"override_active":    csm.IsManualOverrideActive(),
 			"override_remaining": csm.ManualOverrideRemaining(),
 			"survey_mode":        si.IsSurveyMode(),
+			"survey_grid_loaded": si.GetSurveyGrid() != nil && si.GetSurveyGrid().IsLoaded(),
 			"overlays": map[string]bool{
 				"target":  *overlays.targetOverlay,
 				"console": *overlays.terminalOverlay,
 				"status":  *overlays.statusOverlay,
 				"pip":     *overlays.pipZoom,
 			},
+		})
+	})
+
+	// Survey grid inspection endpoint
+	mux.HandleFunc("/survey/cell", func(w http.ResponseWriter, r *http.Request) {
+		cell := si.GetSurveyCell()
+		w.Header().Set("Content-Type", "application/json")
+		if cell == nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "no survey grid loaded or no cell at current position"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":               true,
+			"pan":              cell.Pan,
+			"tilt":             cell.Tilt,
+			"best_score":       cell.BestScore,
+			"boats_possible":   cell.BoatsPossible,
+			"has_seawall":      cell.HasSeawall,
+			"has_bridge":       cell.HasBridge,
+			"has_water":        cell.HasWater,
+			"has_corridor":     cell.HasCorridor,
+			"corridor":         cell.Corridor,
+			"mask_advice":      cell.MaskAdvice,
+			"expected_objects": cell.ExpectedObjects,
+			"high_fp_regions":  cell.HighFPRegions,
+			"exclusion":        cell.Exclusion,
 		})
 	})
 
@@ -2892,6 +2922,14 @@ func main() {
 
 	// Set up debug references for dual logging (terminal + files)
 	spatialIntegration.SetDebugReferences(debugManager, renderer)
+
+	// Load survey grid for spatial awareness (seawall suppression, expected-object validation)
+	if *surveyGridPath != "" {
+		spatialIntegration.SetSurveyGrid(*surveyGridPath)
+		debugMsg("SURVEY", fmt.Sprintf("Survey grid loaded from %s", *surveyGridPath))
+	} else {
+		debugMsg("SURVEY", "No survey grid specified (use -survey-grid to enable false-positive suppression)")
+	}
 
 	// Log spatial tracking initialization
 	debugMsg("SPATIAL", fmt.Sprintf("Initialized spatial tracking system (Frame: %dx%d)", pictureWidth, pictureHeight))

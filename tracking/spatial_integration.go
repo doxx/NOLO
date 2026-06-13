@@ -1,14 +1,222 @@
 package tracking
 
 import (
+	"encoding/json"
 	"fmt"
 	"image"
 	"math"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"rivercam/ptz"
 )
+
+// SurveyFrameRegion mirrors the survey tool's per-region analysis
+type SurveyFrameRegion struct {
+	Region            string `json:"region"`
+	Content           string `json:"content"`
+	FalsePositiveRisk string `json:"false_positive_risk"`
+}
+
+// SurveyZoomLayer mirrors a single zoom capture from the survey grid
+type SurveyZoomLayer struct {
+	Zoom            int                 `json:"zoom"`
+	InterestScore   int                 `json:"interest_score"`
+	BoatsPossible   bool                `json:"boats_possible"`
+	Features        []string            `json:"features"`
+	TrackingValue   string              `json:"tracking_value"`
+	FrameRegions    []SurveyFrameRegion `json:"frame_regions"`
+	MaskAdvice      string              `json:"mask_advice"`
+	ExpectedObjects []string            `json:"expected_objects"`
+	BoatCorridor    string              `json:"boat_corridor"`
+}
+
+// SurveyGridPoint mirrors a single position from the survey grid JSON
+type SurveyGridPoint struct {
+	Pan        int               `json:"pan"`
+	Tilt       int               `json:"tilt"`
+	Key        string            `json:"key"`
+	ZoomLayers []SurveyZoomLayer `json:"zoom_layers"`
+	Scene      string            `json:"scene"`
+	Exclusion  bool              `json:"exclusion"`
+	BestUse    string            `json:"best_use"`
+	ScanDwell  int               `json:"scan_dwell"`
+}
+
+// SurveyCell is a pre-computed summary of a grid point for fast runtime lookups
+type SurveyCell struct {
+	Pan             int
+	Tilt            int
+	BestScore       int
+	BoatsPossible   bool
+	HasSeawall      bool
+	HasBridge       bool
+	HasWater        bool
+	HasCorridor     bool   // true when boats actively move through this position
+	Corridor        string // "horizontal", "vertical", "diagonal", or ""
+	MaskAdvice      string
+	ExpectedObjects []string
+	HighFPRegions   int // count of frame regions with high false-positive risk
+	Exclusion       bool
+}
+
+// SurveyGrid holds loaded survey data indexed for fast PTZ lookups
+type SurveyGrid struct {
+	cells    map[string]*SurveyCell
+	panStep  int
+	tiltStep int
+	loaded   bool
+}
+
+// LoadSurveyGrid reads a survey grid JSON and builds a lookup table.
+// The JSON is the full SurveyReport with a "grid" key containing
+// map[string]*SurveyGridPoint entries keyed like "P0900_T0050".
+func LoadSurveyGrid(path string) *SurveyGrid {
+	sg := &SurveyGrid{
+		cells:    make(map[string]*SurveyCell),
+		panStep:  100,
+		tiltStep: 100,
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("[SURVEY_GRID] Could not load survey grid from %s: %v\n", path, err)
+		return sg
+	}
+
+	// The file may be either a full SurveyReport (with "grid" key)
+	// or a raw map of grid points. Try full report first.
+	var report struct {
+		Grid map[string]*SurveyGridPoint `json:"grid"`
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		fmt.Printf("[SURVEY_GRID] Failed to parse survey grid: %v\n", err)
+		return sg
+	}
+
+	grid := report.Grid
+	if len(grid) == 0 {
+		// Try parsing as a raw map (no wrapper)
+		var raw map[string]*SurveyGridPoint
+		if err := json.Unmarshal(data, &raw); err == nil && len(raw) > 0 {
+			grid = raw
+		}
+	}
+
+	if len(grid) == 0 {
+		fmt.Printf("[SURVEY_GRID] No grid points found in %s\n", path)
+		return sg
+	}
+
+	for key, point := range grid {
+		cell := &SurveyCell{
+			Pan:       point.Pan,
+			Tilt:      point.Tilt,
+			Exclusion: point.Exclusion,
+		}
+		for _, zl := range point.ZoomLayers {
+			if zl.InterestScore > cell.BestScore {
+				cell.BestScore = zl.InterestScore
+			}
+			if zl.BoatsPossible {
+				cell.BoatsPossible = true
+			}
+			if zl.BoatCorridor != "" && zl.BoatCorridor != "none" && cell.Corridor == "" {
+				cell.Corridor = zl.BoatCorridor
+				cell.HasCorridor = true
+			}
+			if zl.MaskAdvice != "" && cell.MaskAdvice == "" {
+				cell.MaskAdvice = zl.MaskAdvice
+			}
+			if len(zl.ExpectedObjects) > 0 && len(cell.ExpectedObjects) == 0 {
+				cell.ExpectedObjects = zl.ExpectedObjects
+			}
+			for _, f := range zl.Features {
+				lower := strings.ToLower(f)
+				if strings.Contains(lower, "seawall") || strings.Contains(lower, "sea wall") {
+					cell.HasSeawall = true
+				}
+				if strings.Contains(lower, "bridge") {
+					cell.HasBridge = true
+				}
+				if strings.Contains(lower, "water") || strings.Contains(lower, "river") {
+					cell.HasWater = true
+				}
+			}
+			for _, fr := range zl.FrameRegions {
+				if fr.FalsePositiveRisk == "high" {
+					cell.HighFPRegions++
+				}
+			}
+		}
+		sg.cells[key] = cell
+	}
+
+	sg.loaded = true
+	fmt.Printf("[SURVEY_GRID] Loaded %d survey cells from %s\n", len(sg.cells), path)
+
+	// Log summary
+	seawallCount, bridgeCount, boatCount, corridorCount, exclusionCount := 0, 0, 0, 0, 0
+	for _, c := range sg.cells {
+		if c.HasSeawall {
+			seawallCount++
+		}
+		if c.HasBridge {
+			bridgeCount++
+		}
+		if c.BoatsPossible {
+			boatCount++
+		}
+		if c.HasCorridor {
+			corridorCount++
+		}
+		if c.Exclusion {
+			exclusionCount++
+		}
+	}
+	fmt.Printf("[SURVEY_GRID] Summary: %d seawall, %d bridge, %d boat-possible, %d active corridors, %d exclusion zones\n",
+		seawallCount, bridgeCount, boatCount, corridorCount, exclusionCount)
+	fmt.Printf("[SURVEY_GRID] River-only mode: tracking restricted to %d positions with active boat corridors\n", corridorCount)
+
+	return sg
+}
+
+// Lookup finds the nearest survey cell to a given PTZ position
+func (sg *SurveyGrid) Lookup(pan, tilt float64) *SurveyCell {
+	if !sg.loaded || len(sg.cells) == 0 {
+		return nil
+	}
+	// Snap to nearest grid cell using step sizes
+	roundedPan := int(math.Round(pan/float64(sg.panStep))) * sg.panStep
+	roundedTilt := int(math.Round(tilt/float64(sg.tiltStep))) * sg.tiltStep
+	key := fmt.Sprintf("P%04d_T%04d", roundedPan, roundedTilt)
+	if cell, ok := sg.cells[key]; ok {
+		return cell
+	}
+	return nil
+}
+
+// IsLoaded returns whether survey data was successfully loaded
+func (sg *SurveyGrid) IsLoaded() bool {
+	return sg.loaded
+}
+
+// IsExpectedObject checks if a detected class is expected at the given position
+func (sg *SurveyGrid) IsExpectedObject(pan, tilt float64, className string) bool {
+	cell := sg.Lookup(pan, tilt)
+	if cell == nil || len(cell.ExpectedObjects) == 0 {
+		return true // no data - assume valid
+	}
+	lower := strings.ToLower(className)
+	for _, expected := range cell.ExpectedObjects {
+		if strings.ToLower(expected) == lower {
+			return true
+		}
+	}
+	return false
+}
 
 // SpatialIntegration is now the PRIMARY tracking system (no more legacy confusion)
 type SpatialIntegration struct {
@@ -55,6 +263,9 @@ type SpatialIntegration struct {
 
 	// Survey mode - external tool controls camera
 	surveyMode          bool              // When true, all tracking is disabled
+
+	// Survey spatial awareness - loaded from grid JSON at startup
+	surveyGrid          *SurveyGrid
 
 	lastLockedPosition  SpatialCoordinate // Where the locked boat was last seen
 	holdoverPositionSet bool              // Whether we've set the holdover position
@@ -316,6 +527,9 @@ func NewSpatialIntegration(ptzCtrl ptz.Controller, frameWidth, frameHeight int, 
 		"tracking_mode":          "LIGHTNING_FAST",
 	})
 
+	// Survey grid is loaded separately via SetSurveyGrid() after construction,
+	// since the path comes from a command-line flag in NOLO.go
+
 	integration.debugMsg("MULTI_TRACKING", fmt.Sprintf("Initialized multi-object tracking system (%dx%d)", frameWidth, frameHeight))
 	integration.debugMsg("MULTI_TRACKING", fmt.Sprintf("LIGHTNING-FAST Lock: %d detections (~%.2fs), max %d lost frames (%.1fs at 30fps)",
 		integration.minDetectionsForLock, float64(integration.minDetectionsForLock)/30.0, integration.maxLostFrames, float64(integration.maxLostFrames)/30.0))
@@ -407,6 +621,31 @@ func (si *SpatialIntegration) IsSurveyMode() bool {
 	si.mu.RLock()
 	defer si.mu.RUnlock()
 	return si.surveyMode
+}
+
+// SetSurveyGrid loads and attaches survey grid data for spatial awareness
+func (si *SpatialIntegration) SetSurveyGrid(path string) {
+	sg := LoadSurveyGrid(path)
+	si.mu.Lock()
+	si.surveyGrid = sg
+	si.mu.Unlock()
+	if sg.IsLoaded() {
+		si.debugMsg("SURVEY_GRID", fmt.Sprintf("Survey grid loaded: %d cells from %s", len(sg.cells), path))
+	}
+}
+
+// GetSurveyCell returns the survey cell for the current camera position
+func (si *SpatialIntegration) GetSurveyCell() *SurveyCell {
+	if si.surveyGrid == nil {
+		return nil
+	}
+	pos := si.ptzCtrl.GetCurrentPosition()
+	return si.surveyGrid.Lookup(pos.Pan, pos.Tilt)
+}
+
+// GetSurveyGrid returns the loaded survey grid (nil if not loaded)
+func (si *SpatialIntegration) GetSurveyGrid() *SurveyGrid {
+	return si.surveyGrid
 }
 
 // isSunrisePark checks if the camera should be parked for sunrise viewing
@@ -747,6 +986,19 @@ func (si *SpatialIntegration) updateAllBoats(detections []image.Rectangle, class
 			continue
 		}
 
+		// Survey-based expected-object validation: reject detections of objects
+		// that should not appear at this camera position according to the survey
+		if si.surveyGrid != nil && si.surveyGrid.IsLoaded() {
+			pos := si.ptzCtrl.GetCurrentPosition()
+			if !si.surveyGrid.IsExpectedObject(pos.Pan, pos.Tilt, className) {
+				if si.frameCount%30 == 0 { // reduce log spam
+					fmt.Printf("[%s][SURVEY_REJECT] %s not expected at P%.0f T%.0f - survey says this is not a boat zone\n",
+						time.Now().Format("15:04:05"), className, pos.Pan, pos.Tilt)
+				}
+				continue
+			}
+		}
+
 		// Calculate detection center and area
 		centerX := detection.Min.X + detection.Dx()/2
 		centerY := detection.Min.Y + detection.Dy()/2
@@ -754,7 +1006,7 @@ func (si *SpatialIntegration) updateAllBoats(detections []image.Rectangle, class
 
 		// REDUCED CONSOLE SPAM: Only show detailed detection info for first few detections per frame
 		if i < 2 { // Only first 2 detections per frame
-			si.debugMsg("DETECTION_DEBUG", fmt.Sprintf("🔍 Processing detection #%d: pos=(%d,%d), size=%dx%d, area=%.0f, conf=%.3f",
+			si.debugMsg("DETECTION_DEBUG", fmt.Sprintf("Processing detection #%d: pos=(%d,%d), size=%dx%d, area=%.0f, conf=%.3f",
 				i+1, centerX, centerY, detection.Dx(), detection.Dy(), area, confidence))
 		}
 
@@ -2570,12 +2822,55 @@ func (si *SpatialIntegration) calculateTargetingScore(boat *TrackedBoat) float64
 			boat.Classification, boat.ID, enhancementBonus, boat.P2Count, enhancementType), boat.ID)
 	}
 
+	// RIVER-ONLY MODE: Survey-based tracking suppression.
+	// Only track boats at positions with active boat corridors on open water.
+	// Everything else (docked marina boats, seawall, bridge, walk) gets penalized.
+	surveyPenalty := 1.0
+	if si.surveyGrid != nil && si.surveyGrid.IsLoaded() {
+		pos := si.ptzCtrl.GetCurrentPosition()
+		if cell := si.surveyGrid.Lookup(pos.Pan, pos.Tilt); cell != nil {
+			if cell.Exclusion {
+				// Exclusion zone - never track here
+				surveyPenalty = 0.05
+				fmt.Printf("[%s][SURVEY_SUPPRESS] Exclusion zone at P%d T%d - near-zero (x0.05) for %s %s\n",
+					time.Now().Format("15:04:05"), cell.Pan, cell.Tilt, boat.Classification, boat.ID)
+			} else if cell.HasCorridor && cell.HasWater && !cell.HasSeawall {
+				// River channel with active boat traffic - full tracking
+				surveyPenalty = 1.0
+			} else if cell.HasCorridor && cell.HasSeawall {
+				// Boats move past seawall here - track but with FP caution
+				surveyPenalty = 0.6
+				si.debugMsg("RIVER_ONLY", fmt.Sprintf("Seawall+corridor at P%d T%d - moderate penalty (x0.6) for %s %s",
+					cell.Pan, cell.Tilt, boat.Classification, boat.ID), boat.ID)
+			} else if cell.HasWater && !cell.HasCorridor {
+				// Open water but no boat traffic pattern - mild suppression
+				surveyPenalty = 0.7
+				si.debugMsg("RIVER_ONLY", fmt.Sprintf("Water but no corridor at P%d T%d - mild penalty (x0.7) for %s %s",
+					cell.Pan, cell.Tilt, boat.Classification, boat.ID), boat.ID)
+			} else if cell.HasSeawall && !cell.HasCorridor {
+				// Seawall with no boat traffic - heavy suppression
+				surveyPenalty = 0.15
+				fmt.Printf("[%s][RIVER_ONLY] Seawall, no corridor at P%d T%d - suppress (x0.15) %s %s\n",
+					time.Now().Format("15:04:05"), cell.Pan, cell.Tilt, boat.Classification, boat.ID)
+			} else {
+				// Marina docks, bridge, walk, buildings, vegetation - not river
+				surveyPenalty = 0.15
+				fmt.Printf("[%s][RIVER_ONLY] Non-river zone at P%d T%d - suppress (x0.15) %s %s\n",
+					time.Now().Format("15:04:05"), cell.Pan, cell.Tilt, boat.Classification, boat.ID)
+			}
+		}
+	}
+
 	// Combine scores - REBALANCED: Favor large P1 objects (mega yachts) over small P1 objects with P2 enhancements
-	totalScore := (detectionScore*0.15 + confidenceScore*0.15 + centerScore*0.10 + sizeScore*0.25 + stabilityBonus*0.15 + enhancementBonus*0.20) * lostFramesPenalty
+	totalScore := (detectionScore*0.15 + confidenceScore*0.15 + centerScore*0.10 + sizeScore*0.25 + stabilityBonus*0.15 + enhancementBonus*0.20) * lostFramesPenalty * surveyPenalty
 
 	// Debug output to understand scoring decisions
-	si.debugMsg("SCORE_DEBUG", fmt.Sprintf("%s %s: det=%.2f(%.0f), conf=%.2f, center=%.2f, size=%.2f, stable=%.2f, p2bonus=%.2f, penalty=%.2f → TOTAL=%.3f",
-		boat.Classification, boat.ID, detectionScore, float64(boat.DetectionCount), confidenceScore, centerScore, sizeScore, stabilityBonus, enhancementBonus, lostFramesPenalty, totalScore), boat.ID)
+	surveyInfo := ""
+	if surveyPenalty < 1.0 {
+		surveyInfo = fmt.Sprintf(", survey=%.2f", surveyPenalty)
+	}
+	si.debugMsg("SCORE_DEBUG", fmt.Sprintf("%s %s: det=%.2f(%.0f), conf=%.2f, center=%.2f, size=%.2f, stable=%.2f, p2bonus=%.2f, penalty=%.2f%s -> TOTAL=%.3f",
+		boat.Classification, boat.ID, detectionScore, float64(boat.DetectionCount), confidenceScore, centerScore, sizeScore, stabilityBonus, enhancementBonus, lostFramesPenalty, surveyInfo, totalScore), boat.ID)
 
 	return totalScore
 }
