@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -1377,6 +1378,12 @@ type FFmpegManager struct {
 	lastProcessState *os.ProcessState
 	debugMu          sync.Mutex
 	startTime        time.Time // Track when FFmpeg started
+
+	// FFmpeg restart tracking
+	restartCount    int
+	lastRestartTime time.Time
+	isRestarting    bool
+	monitorCancel   context.CancelFunc
 }
 
 // TimedFrame represents a frame with sequencing information
@@ -1652,8 +1659,9 @@ func (m *FFmpegManager) timedWriteWorker() {
 					m.UpdateDebugInfo(len(frame.data), writeTime, err)
 
 					if err != nil {
-						debugMsgVerbose("FFMPEG_SEQUENCE", fmt.Sprintf("Write error for frame %d: %v", frame.frameNum, err))
-						return // Exit worker on error
+						debugMsgVerbose("FFMPEG_SEQUENCE", fmt.Sprintf("Write error for frame %d (FFmpeg may be restarting): %v", frame.frameNum, err))
+						time.Sleep(100 * time.Millisecond)
+						break // Skip remaining pending frames, wait for next from writeQueue
 					}
 
 					// Debug info every 300 frames (10 seconds at 30fps)
@@ -1726,6 +1734,10 @@ func (m *FFmpegManager) UpdateFlushInfo(err error) {
 func (m *FFmpegManager) monitor() {
 	debugMsg("FFMPEG_MONITOR", fmt.Sprintf("Starting FFmpeg process monitor (PID: %d)", m.cmd.Process.Pid))
 
+	// Create cancel context for health check goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+	m.monitorCancel = cancel
+
 	// Enhanced monitoring with multiple checks
 	go func() {
 		// Check process status every 50ms (faster detection)
@@ -1733,10 +1745,13 @@ func (m *FFmpegManager) monitor() {
 		defer ticker.Stop()
 
 		lastWriteCheck := time.Now()
-		writeStallThreshold := 5 * time.Second
+		writeStallThreshold := 15 * time.Second
 
 		for {
 			select {
+			case <-ctx.Done():
+				debugMsg("FFMPEG_MONITOR", "Health check goroutine cancelled (FFmpeg restarting)")
+				return
 			case <-ticker.C:
 				// Check if process still exists
 				if m.cmd.Process != nil {
@@ -1765,6 +1780,7 @@ func (m *FFmpegManager) monitor() {
 						if timeSinceLastWrite > writeStallThreshold {
 							debugMsg("FFMPEG_MONITOR", fmt.Sprintf("No frame writes for %v (startup was %v ago) - FFmpeg may be stalled",
 								timeSinceLastWrite, time.Since(m.startTime)))
+							if m.isRestarting { return }
 							m.triggerEmergencyShutdown("write stall detected")
 							return
 						}
@@ -1772,6 +1788,7 @@ func (m *FFmpegManager) monitor() {
 						// If last write had an error, FFmpeg is likely dead
 						if lastWriteErr != nil && time.Since(lastWriteCheck) > 1*time.Second {
 							debugMsg("FFMPEG_MONITOR", fmt.Sprintf("Recent write error detected: %v", lastWriteErr))
+							if m.isRestarting { return }
 							m.triggerEmergencyShutdown("write error detected")
 							return
 						}
@@ -1810,8 +1827,94 @@ func (m *FFmpegManager) monitor() {
 		exitReason = "unknown exit"
 	}
 
-	// Trigger shutdown
+	// Try restart instead of emergency shutdown
+	now := time.Now()
+	if time.Since(m.lastRestartTime) > 60*time.Second {
+		m.restartCount = 0
+	}
+	if m.restartCount < 3 {
+		m.restartCount++
+		m.lastRestartTime = now
+		debugMsg("FFMPEG_RESTART", fmt.Sprintf("FFmpeg died (%s) - attempting restart %d/3...", exitReason, m.restartCount))
+		if err := m.restartFFmpeg(); err != nil {
+			debugMsg("FFMPEG_RESTART", fmt.Sprintf("Restart failed: %v - falling back to emergency shutdown", err))
+			m.triggerEmergencyShutdown("restart failed: " + err.Error())
+		}
+		return
+	}
+	debugMsg("FFMPEG_RESTART", fmt.Sprintf("Too many restarts (%d in 60s) - emergency shutdown", m.restartCount))
 	m.triggerEmergencyShutdown(exitReason)
+}
+
+// restartFFmpeg stops the current FFmpeg and starts a new one without killing the process
+func (m *FFmpegManager) restartFFmpeg() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.isRestarting = true
+	defer func() { m.isRestarting = false }()
+
+	// Cancel the old monitor health check goroutine
+	if m.monitorCancel != nil {
+		m.monitorCancel()
+	}
+
+	debugMsg("FFMPEG_RESTART", "Stopping old FFmpeg process...")
+
+	// Kill old process
+	if m.cmd != nil && m.cmd.Process != nil {
+		if m.pgid != 0 {
+			syscall.Kill(-m.pgid, syscall.SIGKILL)
+		}
+		m.cmd.Process.Kill()
+		m.cmd.Wait()
+	}
+
+	// Create new FFmpeg command
+	m.cmd = setupFFmpeg(m.pictureSize)
+	stdin, err := m.cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("could not get FFmpeg stdin: %v", err)
+	}
+	m.stdinPipe = stdin
+	m.stdin = bufio.NewWriterSize(stdin, 48*1024*1024)
+
+	stdout, _ := m.cmd.StdoutPipe()
+	stderr, _ := m.cmd.StderrPipe()
+
+	m.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+
+	if err := m.cmd.Start(); err != nil {
+		return fmt.Errorf("could not start FFmpeg: %v", err)
+	}
+	m.pgid = m.cmd.Process.Pid
+
+	now := time.Now()
+	m.startTime = now
+	m.debugMu.Lock()
+	m.lastFrameTime = now
+	m.lastFlushTime = now
+	m.lastWriteError = nil
+	m.debugMu.Unlock()
+
+	debugMsg("FFMPEG_RESTART", fmt.Sprintf("New FFmpeg started (PID: %d)", m.cmd.Process.Pid))
+
+	// Start output readers
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() { debugMsg("FFMPEG_STDOUT", scanner.Text()) }
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() { debugMsg("FFMPEG_STDERR", scanner.Text()) }
+	}()
+
+	// Start new monitor
+	go m.monitor()
+
+	return nil
 }
 
 // triggerEmergencyShutdown handles the emergency shutdown process
@@ -2516,7 +2619,6 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 			"ok":                 success,
 			"command":            reason,
 			"override_remaining": csm.ManualOverrideRemaining(),
-			"survey_mode":        si.IsSurveyMode(),
 		})
 	}
 
@@ -2669,7 +2771,7 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 		pan, tilt, zoom := 1500.0, 100.0, 10.0
 		cmd := ptz.PTZCommand{
 			Command:      "absolutePosition",
-			Reason:       "SURVEY_STOP (return to scan start)",
+			Reason:       "Survey mode ended - return to scan",
 			Duration:     2 * time.Second,
 			AbsolutePan:  &pan,
 			AbsoluteTilt: &tilt,
@@ -2678,28 +2780,6 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 		csm.ForceCommand(cmd)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "survey_mode": false, "message": "Survey mode disabled - camera returning to scan position"})
-	})
-
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		pos := si.GetPTZController().GetCurrentPosition()
-		mode := si.GetTrackingMode()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"mode":               mode,
-			"pan":                pos.Pan,
-			"tilt":               pos.Tilt,
-			"zoom":               pos.Zoom,
-			"override_active":    csm.IsManualOverrideActive(),
-			"override_remaining": csm.ManualOverrideRemaining(),
-			"survey_mode":        si.IsSurveyMode(),
-			"survey_grid_loaded": si.GetSurveyGrid() != nil && si.GetSurveyGrid().IsLoaded(),
-			"overlays": map[string]bool{
-				"target":  *overlays.targetOverlay,
-				"console": *overlays.terminalOverlay,
-				"status":  *overlays.statusOverlay,
-				"pip":     *overlays.pipZoom,
-			},
-		})
 	})
 
 	// Survey grid inspection endpoint
@@ -2725,6 +2805,29 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 			"expected_objects": cell.ExpectedObjects,
 			"high_fp_regions":  cell.HighFPRegions,
 			"exclusion":        cell.Exclusion,
+		})
+	})
+
+	// Status endpoint
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		pos := si.GetPTZController().GetCurrentPosition()
+		mode := si.GetTrackingMode()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"mode":               mode,
+			"pan":                pos.Pan,
+			"tilt":               pos.Tilt,
+			"zoom":               pos.Zoom,
+			"override_active":    csm.IsManualOverrideActive(),
+			"override_remaining": csm.ManualOverrideRemaining(),
+			"survey_mode":        si.IsSurveyMode(),
+			"survey_grid_loaded": si.GetSurveyGrid() != nil && si.GetSurveyGrid().IsLoaded(),
+			"overlays": map[string]bool{
+				"target":   *overlays.targetOverlay,
+				"console":  *overlays.terminalOverlay,
+				"status":   *overlays.statusOverlay,
+				"pip":      *overlays.pipZoom,
+			},
 		})
 	})
 
@@ -3197,7 +3300,7 @@ func main() {
 	errorChan := make(chan error, 1)
 
 	// Start frame capture goroutine
-	go captureFrames(webcam, frameChan, errorChan, stats)
+	go captureFrames(webcam, streamURL, frameChan, errorChan, stats)
 
 	// Start FFmpeg writer goroutine
 	go writeFrames(frameChan, ffmpegManager, renderer, spatialIntegration, &net, classNames, stats, ffmpegManager.GetStopChan(), *debugMode, debugManager, cameraStateManager, *pipZoomEnabled, gpuMonitor, rtmpChecker, ffmpegMonitor)
@@ -3663,30 +3766,76 @@ func setupFFmpeg(pictureSize string) *exec.Cmd {
 }
 
 // captureFrames handles frame capture from the camera
-func captureFrames(webcam *gocv.VideoCapture, frameChan chan<- FrameData, errorChan chan<- error, stats *PipelineStats) {
+func captureFrames(webcam *gocv.VideoCapture, streamURL string, frameChan chan<- FrameData, errorChan chan<- error, stats *PipelineStats) {
 	frameSequence := int64(0)
+	lastFrame := gocv.NewMat()
+	hasLastFrame := false
+	defer lastFrame.Close()
 
 	for {
 		readStart := time.Now()
 		img := gocv.NewMat()
 		trackMatAlloc("capture")
 
-		// Try to read frame - NO ARTIFICIAL DELAY, read as fast as camera provides
 		if ok := webcam.Read(&img); !ok {
 			img.Close()
 			trackMatClose("capture")
-			errorChan <- fmt.Errorf("failed to read frame from stream")
-			return
+			debugMsg("RTSP_RECONNECT", "Camera feed lost - entering reconnect mode")
+			webcam.Close()
+
+			reconnected := false
+			for attempt := 1; attempt <= 60; attempt++ {
+				debugMsg("RTSP_RECONNECT", fmt.Sprintf("Attempt %d/60 - feeding last frame while retrying...", attempt))
+
+				if hasLastFrame && !lastFrame.Empty() {
+					for tick := 0; tick < 150; tick++ {
+						clone := gocv.NewMat()
+						lastFrame.CopyTo(&clone)
+						trackMatAlloc("capture")
+						fd := FrameData{frame: clone, sequence: frameSequence, timestamp: time.Now()}
+						select {
+						case frameChan <- fd:
+							frameSequence++
+						default:
+							clone.Close()
+							trackMatClose("capture")
+						}
+						time.Sleep(33 * time.Millisecond)
+					}
+				} else {
+					time.Sleep(5 * time.Second)
+				}
+
+				newWebcam, err := gocv.VideoCaptureFile(streamURL)
+				if err != nil {
+					continue
+				}
+				newWebcam.Set(gocv.VideoCaptureBufferSize, 1)
+				testImg := gocv.NewMat()
+				if ok := newWebcam.Read(&testImg); ok && !testImg.Empty() {
+					testImg.Close()
+					webcam = newWebcam
+					reconnected = true
+					debugMsg("RTSP_RECONNECT", fmt.Sprintf("Reconnected after %d attempts", attempt))
+					break
+				}
+				testImg.Close()
+				newWebcam.Close()
+			}
+
+			if !reconnected {
+				errorChan <- fmt.Errorf("RTSP reconnect failed after 60 attempts (5 minutes)")
+				return
+			}
+			continue
 		}
 
-		// Check if frame is valid
 		if img.Empty() {
 			img.Close()
 			trackMatClose("capture")
 			continue
 		}
 
-		// Verify frame dimensions and type
 		if img.Type() != gocv.MatTypeCV8UC3 || img.Channels() != 3 {
 			img.Close()
 			trackMatClose("capture")
@@ -3695,19 +3844,21 @@ func captureFrames(webcam *gocv.VideoCapture, frameChan chan<- FrameData, errorC
 
 		stats.UpdateCapture(time.Since(readStart))
 
-		// Create frame data with current sequence
+		if frameSequence%30 == 0 {
+			img.CopyTo(&lastFrame)
+			hasLastFrame = true
+		}
+
 		frameData := FrameData{
 			frame:     img,
 			sequence:  frameSequence,
-			timestamp: time.Now(), // Real-time timestamp when frame was actually read
+			timestamp: time.Now(),
 		}
 
 		select {
 		case frameChan <- frameData:
-			// Frame sent successfully - increment sequence for next frame
 			frameSequence++
 		default:
-			// Channel full, drop frame and continue reading (sequence not incremented - will retry)
 			img.Close()
 			trackMatClose("capture")
 		}
@@ -3959,182 +4110,124 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 
 					// Parse detections based on model type
 					if globalYOLOModelType == "v8n" {
-						// === YOLOv8 OUTPUT PARSING (OPTIMIZED - ZERO CGO IN INNER LOOP) ===
-						// Output shape: [1, 84, 8400] as contiguous float32 array
-						// Layout in memory (row-major after reshape to [84, 8400]):
-						//   Row 0: cx values for all 8400 candidates
-						//   Row 1: cy values for all 8400 candidates
-						//   Row 2: w values for all 8400 candidates
-						//   Row 3: h values for all 8400 candidates
-						//   Row 4-83: class 0-79 scores for all 8400 candidates
-						// Access: data[row * numDetections + col]
+						// === YOLOv8 OUTPUT PARSING ===
+						// Output shape: [1, 84, 8400] - need to reshape to [84, 8400]
+						// Row = field (0-3: x,y,w,h  4-83: class scores), Col = detection candidate
 						outputSize := output.Size()
 						if len(outputSize) < 3 {
 							debugMsg("YOLO_ERROR", fmt.Sprintf("Unexpected v8 output shape: %v", outputSize))
 						} else {
+							numFields := outputSize[1]     // 84
 							numDetections := outputSize[2] // 8400
-							numClasses := 80
+							data2D := output.Reshape(1, numFields)
+							defer data2D.Close()
 
-							// CRITICAL OPTIMIZATION: Read entire tensor into Go slice with ONE CGO call
-							// This replaces ~705,600 individual GetFloatAt() CGO calls per frame
-							rawData, err := output.DataPtrFloat32()
-							if err != nil || rawData == nil {
-								debugMsg("YOLO_ERROR", fmt.Sprintf("Failed to get v8 output data pointer: %v", err))
-							} else {
-								// Pre-compute confidence threshold as float32 for fast comparison
-								confThreshF32 := float32(globalP1MinConfidence)
-								p2ConfThreshF32 := float32(globalP2MinConfidence)
-								isTracking := spatialIntegration.GetCurrentMode() == tracking.ModeTracking
+							// PERFORMANCE: Bulk read entire tensor in one CGO call
+							// instead of per-element GetFloatAt (was 705K CGO calls/frame)
+							rawData, rawErr := data2D.DataPtrFloat32()
+							if rawErr != nil {
+								debugMsg("YOLO_ERROR", fmt.Sprintf("Failed to get v8n tensor data: %v", rawErr))
+							}
 
-								// Collect candidates for NMS
-								var nmsBoxes []image.Rectangle
-								var nmsConfidences []float32
-								var nmsClassNames []string
+							// Collect candidates for NMS
+							var nmsBoxes []image.Rectangle
+							var nmsConfidences []float32
+							var nmsClassIDs []int
+							var nmsClassNames []string
 
-								for i := 0; i < numDetections; i++ {
-									// Find best class score — pure Go, no CGO
-									var maxScore float32
-									var maxClassID int
-									for c := 0; c < numClasses; c++ {
-										score := rawData[(4+c)*numDetections+i]
-										if score > maxScore {
-											maxScore = score
-											maxClassID = c
-										}
+							stride := numDetections // row-major: data[field * stride + detection]
+							for i := 0; i < numDetections && rawErr == nil; i++ {
+								var maxScore float32
+								var maxClassID int
+								for c := 0; c < 80; c++ {
+									score := rawData[(c+4)*stride+i]
+									if score > maxScore {
+										maxScore = score
+										maxClassID = c
 									}
+								}
 
-									// Early exit: skip if below minimum possible threshold
-									if maxScore < confThreshF32 && maxScore < p2ConfThreshF32 {
-										continue
-									}
+								className := ""
+								if maxClassID < len(classNames) {
+									className = classNames[maxClassID]
+								}
 
-									className := ""
-									if maxClassID < len(classNames) {
-										className = classNames[maxClassID]
-									}
+								// v8 coordinates are in input pixel space (0-640)
+								cx := float64(rawData[0*stride+i])
+								cy := float64(rawData[1*stride+i])
+								w := float64(rawData[2*stride+i])
+								h := float64(rawData[3*stride+i])
 
-									// Class filtering with appropriate threshold
-									validClass := false
-									if isP1Object(className) {
-										validClass = maxScore >= confThreshF32
-									} else if isP2Object(className) && isTracking {
-										validClass = maxScore >= p2ConfThreshF32
-									}
-									if !validClass {
-										continue
-									}
+								// Transform from letterboxed input space to original frame coordinates
+								origX := cx * float64(scaleX)
+								origY := (cy - float64(yOffsetF)) * float64(scaleY)
+								origW := w * float64(scaleX)
+								origH := h * float64(scaleY)
 
-									// Read bbox coordinates — pure Go array access
-									cx := float64(rawData[0*numDetections+i])
-									cy := float64(rawData[1*numDetections+i])
-									w := float64(rawData[2*numDetections+i])
-									h := float64(rawData[3*numDetections+i])
+								left := int(origX - origW/2)
+								top := int(origY - origH/2)
+								width := int(origW)
+								height := int(origH)
 
-									// Transform from letterboxed input space to original frame coordinates
-									origX := cx * float64(scaleX)
-									origY := (cy - float64(yOffsetF)) * float64(scaleY)
-									origW := w * float64(scaleX)
-									origH := h * float64(scaleY)
+								// Clamp to frame
+								if left < 0 { left = 0 }
+								if top < 0 { top = 0 }
+								if left+width > int(originalWidth) { width = int(originalWidth) - left }
+								if top+height > int(originalHeight) { height = int(originalHeight) - top }
 
-									left := int(origX - origW/2)
-									top := int(origY - origH/2)
-									width := int(origW)
-									height := int(origH)
+								rect := image.Rect(left, top, left+width, top+height)
 
-									// Clamp to frame
-									if left < 0 {
-										left = 0
-									}
-									if top < 0 {
-										top = 0
-									}
-									if left+width > int(originalWidth) {
-										width = int(originalWidth) - left
-									}
-									if top+height > int(originalHeight) {
-										height = int(originalHeight) - top
-									}
-
-									// Size filtering
-									if width*height < 2000 {
-										continue
-									}
-									if isP1Object(className) && (width <= 50 || height <= 50) {
-										continue
-									}
-
-									// SEAWALL FILTER: Reject unrealistically large "boats" at frame edges
-									// The seawall is detected as a massive boat (30%+ of frame) touching
-									// the edge. Real boats entering from the edge are normal-sized.
-									// Small/medium boats at edges = real boats entering frame (allowed)
-									// Giant boats at edges = seawall/structure false positive (rejected)
-									if isP1Object(className) {
-										edgeMargin := 15
-										touchesEdge := left <= edgeMargin || top <= edgeMargin ||
-											left+width >= int(originalWidth)-edgeMargin ||
-											top+height >= int(originalHeight)-edgeMargin
-										isHuge := float64(width) > float64(originalWidth)*0.30 ||
-											float64(height) > float64(originalHeight)*0.30
-
-										if touchesEdge && isHuge {
-											// Giant boat at edge = seawall. Still show in overlay for debug.
-											rect := image.Rect(left, top, left+width, top+height)
-											allRawDetections = append(allRawDetections, rect)
-											allRawClassNames = append(allRawClassNames, className)
-											allRawConfidences = append(allRawConfidences, float64(maxScore))
-											continue
-										}
-
-										// Keep the 2+ edge filter as backup
-										edgeCount := 0
-										if left <= edgeMargin {
-											edgeCount++
-										}
-										if top <= edgeMargin {
-											edgeCount++
-										}
-										if left+width >= int(originalWidth)-edgeMargin {
-											edgeCount++
-										}
-										if top+height >= int(originalHeight)-edgeMargin {
-											edgeCount++
-										}
-										if edgeCount >= 2 {
-											// Skip — but still show in raw overlay for debugging
-											rect := image.Rect(left, top, left+width, top+height)
-											allRawDetections = append(allRawDetections, rect)
-											allRawClassNames = append(allRawClassNames, className)
-											allRawConfidences = append(allRawConfidences, float64(maxScore))
-											continue
-										}
-									}
-
-									rect := image.Rect(left, top, left+width, top+height)
-
-									// Store raw detection for overlay
+								// Store raw detection for overlay
+								if maxScore > 0.1 {
 									allRawDetections = append(allRawDetections, rect)
 									allRawClassNames = append(allRawClassNames, className)
 									allRawConfidences = append(allRawConfidences, float64(maxScore))
-
-									nmsBoxes = append(nmsBoxes, rect)
-									nmsConfidences = append(nmsConfidences, maxScore)
-									nmsClassNames = append(nmsClassNames, className)
 								}
 
-								// Apply NMS to remove overlapping detections
-								if len(nmsBoxes) > 0 {
-									nmsIndices := gocv.NMSBoxes(nmsBoxes, nmsConfidences, confThreshF32, 0.45)
-									for _, idx := range nmsIndices {
-										detectionRects = append(detectionRects, nmsBoxes[idx])
-										detectionClassNames = append(detectionClassNames, nmsClassNames[idx])
-										detectionConfidences = append(detectionConfidences, float64(nmsConfidences[idx]))
+								// Class and confidence filtering
+								validClass := false
+								var minConfidenceThreshold float64
+								if isP1Object(className) {
+									validClass = true
+									minConfidenceThreshold = globalP1MinConfidence
+								} else if isP2Object(className) {
+									if spatialIntegration.GetCurrentMode() == tracking.ModeTracking {
+										validClass = true
+										minConfidenceThreshold = globalP2MinConfidence
+									}
+								}
+								if !validClass || float64(maxScore) < minConfidenceThreshold {
+									continue
+								}
 
-										debugMsgVerbose("YOLO_ACCEPT", fmt.Sprintf("%s: conf=%.2f, area=%d",
-											nmsClassNames[idx], nmsConfidences[idx], nmsBoxes[idx].Dx()*nmsBoxes[idx].Dy()))
+								// Size filtering
+								if width*height < 2000 {
+									continue
+								}
+								if isP1Object(className) && (width <= 50 || height <= 50) {
+									debugMsg("YOLO_FILTER", fmt.Sprintf("Rejecting small %s: %dx%d", className, width, height))
+									continue
+								}
 
-										if *yoloOverlay {
-											renderer.DrawDetection(frameToWrite, nmsBoxes[idx], nmsClassNames[idx], float64(nmsConfidences[idx]))
-										}
+								nmsBoxes = append(nmsBoxes, rect)
+								nmsConfidences = append(nmsConfidences, maxScore)
+								nmsClassIDs = append(nmsClassIDs, maxClassID)
+								nmsClassNames = append(nmsClassNames, className)
+							}
+
+							// Apply NMS to remove overlapping detections
+							if len(nmsBoxes) > 0 {
+								nmsIndices := gocv.NMSBoxes(nmsBoxes, nmsConfidences, float32(globalP1MinConfidence), 0.45)
+								for _, idx := range nmsIndices {
+									detectionRects = append(detectionRects, nmsBoxes[idx])
+									detectionClassNames = append(detectionClassNames, nmsClassNames[idx])
+									detectionConfidences = append(detectionConfidences, float64(nmsConfidences[idx]))
+
+									debugMsgVerbose("YOLO_ACCEPT", fmt.Sprintf("%s: conf=%.2f, area=%d",
+										nmsClassNames[idx], nmsConfidences[idx], nmsBoxes[idx].Dx()*nmsBoxes[idx].Dy()))
+
+									if *yoloOverlay {
+										renderer.DrawDetection(frameToWrite, nmsBoxes[idx], nmsClassNames[idx], float64(nmsConfidences[idx]))
 									}
 								}
 							}
@@ -4200,33 +4293,24 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 								}
 							}
 							if !validClass || confidence < float32(minConfidenceThreshold) {
-								scores.Close()
-								trackMatClose("yolo")
-								data.Close()
-								trackMatClose("yolo")
-								row.Close()
-								trackMatClose("yolo")
+								scores.Close(); trackMatClose("yolo")
+								data.Close(); trackMatClose("yolo")
+								row.Close(); trackMatClose("yolo")
 								continue
 							}
 
 							// Size filtering
 							if width*height < 2000 {
-								scores.Close()
-								trackMatClose("yolo")
-								data.Close()
-								trackMatClose("yolo")
-								row.Close()
-								trackMatClose("yolo")
+								scores.Close(); trackMatClose("yolo")
+								data.Close(); trackMatClose("yolo")
+								row.Close(); trackMatClose("yolo")
 								continue
 							}
 							if isP1Object(className) && (width <= 50 || height <= 50) {
 								debugMsg("YOLO_FILTER", fmt.Sprintf("Rejecting small %s: %dx%d", className, width, height))
-								scores.Close()
-								trackMatClose("yolo")
-								data.Close()
-								trackMatClose("yolo")
-								row.Close()
-								trackMatClose("yolo")
+								scores.Close(); trackMatClose("yolo")
+								data.Close(); trackMatClose("yolo")
+								row.Close(); trackMatClose("yolo")
 								continue
 							}
 
@@ -4241,12 +4325,9 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 								renderer.DrawDetection(frameToWrite, rect, className, float64(confidence))
 							}
 
-							scores.Close()
-							trackMatClose("yolo")
-							data.Close()
-							trackMatClose("yolo")
-							row.Close()
-							trackMatClose("yolo")
+							scores.Close(); trackMatClose("yolo")
+							data.Close(); trackMatClose("yolo")
+							row.Close(); trackMatClose("yolo")
 						}
 					}
 
@@ -4748,28 +4829,11 @@ func writeFrames(frameChan <-chan FrameData, ffmpegManager *FFmpegManager, rende
 					debugMsg("FFMPEG_ERROR", fmt.Sprintf("Error details: %T - %v", err, err))
 					debugMsg("FFMPEG_ERROR", "This indicates FFmpeg has crashed or stdin pipe is broken")
 					debugMsg("FFMPEG_ERROR", fmt.Sprintf("Frame size: %d bytes", requiredSize))
-					debugMsg("FFMPEG_ERROR", "Triggering emergency shutdown from stdin write failure")
+					debugMsg("FFMPEG_ERROR", "Stdin write failed - FFmpeg manager will handle restart")
 
 					frameToWrite.Close()
 					trackMatClose("buffer")
-
-					// Signal FFmpeg failure immediately
-					ffmpegManager.Stop()
-
-					// Kill any remaining FFmpeg processes
-					exec.Command("pkill", "-9", "ffmpeg").Run()
-
-					// Give a moment for cleanup
-					time.Sleep(100 * time.Millisecond)
-
-					// Force exit with FFmpeg error code - multiple attempts for reliability
-					debugMsg("FFMPEG_STDIN_ERROR", "Force exiting application with code 3 (stdin write failure)")
-					go func() {
-						time.Sleep(50 * time.Millisecond)
-						debugMsg("FFMPEG_STDIN_ERROR", "Secondary exit attempt from stdin error")
-						os.Exit(3)
-					}()
-					os.Exit(3)
+					continue
 				}
 
 				stats.UpdateWrite(writeTime)

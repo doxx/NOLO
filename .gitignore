@@ -116,3 +116,15 @@ keys/*.txt
 keys/*.json
 keys/*.key
 keys/*.pem
+
+# Build test artifacts
+NOLO.bad
+NOLO.fixed
+NOLO.go.pre-fix
+*.pre-fix
+
+# Survey data (deployment-specific analysis)
+survey-data/
+
+# Test scripts (contain camera credentials)
+scripts/

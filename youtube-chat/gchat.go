@@ -438,12 +438,12 @@ func (cb *ChatBot) PollMessages(ctx context.Context) {
 			log.Println("[CHAT] Chat polling stopped")
 			return
 		case <-ticker.C:
-			cb.fetchMessages()
+			cb.fetchMessages(ticker)
 		}
 	}
 }
 
-func (cb *ChatBot) fetchMessages() {
+func (cb *ChatBot) fetchMessages(ticker *time.Ticker) {
 	call := cb.service.LiveChatMessages.List(cb.liveChatID, []string{"snippet", "authorDetails"})
 	if cb.nextPageToken != "" {
 		call.PageToken(cb.nextPageToken)
@@ -496,6 +496,7 @@ func (cb *ChatBot) fetchMessages() {
 		newInterval := time.Duration(response.PollingIntervalMillis) * time.Millisecond
 		if newInterval != cb.pollInterval {
 			cb.pollInterval = newInterval
+			ticker.Reset(newInterval)
 			log.Printf("[CHAT] Adjusted poll interval to %v", cb.pollInterval)
 		}
 	}
