@@ -3783,8 +3783,10 @@ func captureFrames(webcam *gocv.VideoCapture, streamURL string, frameChan chan<-
 
 		stats.UpdateCapture(time.Since(readStart))
 
-		img.CopyTo(&lastFrame)
-		hasLastFrame = true
+		if frameSequence%30 == 0 {
+			img.CopyTo(&lastFrame)
+			hasLastFrame = true
+		}
 
 		frameData := FrameData{
 			frame:     img,
