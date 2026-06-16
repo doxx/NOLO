@@ -208,15 +208,7 @@ func (ch *CommandHandler) SendChatMessage(text string) {
 
 // ProcessCommand validates and queues a command
 func (ch *CommandHandler) ProcessCommand(cmd Command) {
-	// Check rate limits
-	canExecute, reason := ch.rateLimiter.CanExecute(cmd.UserID)
-	if !canExecute {
-		log.Printf("[RATE_LIMIT] %s (%s): %s - %s", cmd.User, cmd.Type, reason, cmd.UserID[:8])
-		return
-	}
-
-	// Record the command
-	ch.rateLimiter.RecordCommand(cmd.UserID)
+	// Rate limiting disabled - let all commands through
 
 	// Log the command (future: send to NOLO API)
 	log.Printf("[COMMAND] %s from %s: #%s", formatCommand(cmd), cmd.User, cmd.Type)
