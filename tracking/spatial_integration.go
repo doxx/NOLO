@@ -495,7 +495,7 @@ func NewSpatialIntegration(ptzCtrl ptz.Controller, frameWidth, frameHeight int, 
 
 		// Initialize multi-object tracking
 		allBoats:             make(map[string]*TrackedBoat),
-		minDetectionsForLock: 2,   // LIGHTNING-FAST: Camera movement at 2 detections (~0.07s) for instant tracking responsiveness
+		minDetectionsForLock: 8,   // Require 8 detections (~0.27s) to confirm target before committing camera
 		maxLostFrames:        150, // Remove boats after 150 lost frames (5.0s at 30fps)
 		targetSwitchCooldown: 120, // INCREASED from 30 to 120 frames for more stable switching
 		lastTargetSwitch:     0,
@@ -2721,26 +2721,22 @@ func (si *SpatialIntegration) selectTargetBoat() {
 		meetsConfidenceCriteria := bestBoat.Confidence > 0.30
 		hasPeopleInside := bestBoat.HasP2Objects && bestBoat.P2Count > 0
 
-		// PEOPLE-VALIDATES-BOAT: Boats with people get fast-tracked to lock
-		// Boats WITHOUT people AND without movement are likely false positives (river edge, building)
+		// Require MOVEMENT or PEOPLE to lock - stationary objects are false positives
 		velocity := math.Sqrt(bestBoat.PixelVelocity.X*bestBoat.PixelVelocity.X + bestBoat.PixelVelocity.Y*bestBoat.PixelVelocity.Y)
-		isMoving := velocity > 5.0
-		isStationary := !isMoving && bestBoat.DetectionCount > 10 // Stationary for 10+ frames
+		isMoving := velocity > 3.0 // 3 px/s minimum - real boats always move
 
-		// Require movement OR people for locking — stationary objects with no people are false positives
-		meetsValidationCriteria := hasPeopleInside || isMoving || bestBoat.DetectionCount <= 5 // Give new detections a chance
+		// Must have movement OR people - no exceptions, no grace period
+		meetsValidationCriteria := hasPeopleInside || isMoving
 
-		// If boat has people, reduce detection requirement (instant confidence)
+		// People with 2+ count can fast-track lock (still need 4 detections minimum)
 		if hasPeopleInside && bestBoat.P2Count >= 2 {
-			meetsDetectionCriteria = bestBoat.DetectionCount >= 1 // 2+ people = lock immediately
+			meetsDetectionCriteria = bestBoat.DetectionCount >= 4
 		} else if hasPeopleInside {
-			meetsDetectionCriteria = meetsDetectionCriteria || bestBoat.DetectionCount >= 1 // 1 person = still fast
+			meetsDetectionCriteria = bestBoat.DetectionCount >= 6
 		}
 
-		// Stationary + no people after 10 frames = reject lock
-		if isStationary && !hasPeopleInside {
-			meetsValidationCriteria = false
-			si.debugMsg("LOCK_REJECT", fmt.Sprintf("🚫 Boat %s rejected: stationary (vel=%.1f) + no people after %d frames — likely false positive",
+		if !meetsValidationCriteria {
+			si.debugMsg("LOCK_REJECT", fmt.Sprintf("Boat %s rejected: not moving (vel=%.1f px/s) and no people after %d frames",
 				bestBoat.ID, velocity, bestBoat.DetectionCount), bestBoat.ID)
 		}
 
@@ -3012,8 +3008,10 @@ func (si *SpatialIntegration) updateCameraTracking() {
 			"currently_locked":          si.targetBoat.IsLocked,
 		})
 
-	// FIXED: Only lock with mature targets (24+ detections + confidence), no early lock
-	if meetsDetectionCriteria && meetsConfidenceCriteria {
+	// Lock requires detection count + confidence + movement/people validation
+	velocity := math.Sqrt(si.targetBoat.PixelVelocity.X*si.targetBoat.PixelVelocity.X + si.targetBoat.PixelVelocity.Y*si.targetBoat.PixelVelocity.Y)
+	hasMoveOrPeople := velocity > 3.0 || (si.targetBoat.HasP2Objects && si.targetBoat.P2Count > 0)
+	if meetsDetectionCriteria && meetsConfidenceCriteria && hasMoveOrPeople {
 		wasAlreadyLocked := si.targetBoat.IsLocked
 		si.targetBoat.IsLocked = true
 
