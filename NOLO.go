@@ -2557,6 +2557,22 @@ func (os *OverlayState) Toggle(name string, enabled bool) bool {
 	return true
 }
 
+func (os *OverlayState) IsEnabled(name string) bool {
+	os.mu.Lock()
+	defer os.mu.Unlock()
+	switch name {
+	case "target":
+		return *os.targetOverlay
+	case "console", "terminal":
+		return *os.terminalOverlay
+	case "status":
+		return *os.statusOverlay
+	case "pip":
+		return *os.pipZoom
+	}
+	return false
+}
+
 func (os *OverlayState) RestoreAll() {
 	os.mu.Lock()
 	defer os.mu.Unlock()
@@ -2757,6 +2773,32 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 			"ok":      true,
 			"overlay": name,
 			"enabled": false,
+		})
+	})
+
+	// Toggle overlays: /toggle/target, /toggle/console, /toggle/pip, /toggle/status
+	mux.HandleFunc("/toggle/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/toggle/")
+		if name == "" {
+			http.Error(w, "usage: /toggle/{target|console|pip|status}", 400)
+			return
+		}
+		newState := !overlays.IsEnabled(name)
+		ok := overlays.Toggle(name, newState)
+		if !ok {
+			http.Error(w, "unknown overlay: "+name+". Options: target, console, pip, status", 404)
+			return
+		}
+		action := "enabled"
+		if !newState {
+			action = "disabled"
+		}
+		debugMsg("API", fmt.Sprintf("Overlay '%s' toggled %s via API", name, action))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"overlay": name,
+			"enabled": newState,
 		})
 	})
 
