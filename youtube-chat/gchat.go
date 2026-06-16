@@ -255,6 +255,7 @@ func (ch *CommandHandler) CommandProcessor(ctx context.Context) {
 func (ch *CommandHandler) executeCommand(cmd Command) {
 	var err error
 	var apiPath string
+	var confirmMsg string
 
 	switch cmd.Type {
 	case "commands":
@@ -300,49 +301,65 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 	// Movement
 	case "up":
 		apiPath = "/ptz/up"
+		confirmMsg = "Moving up (stream has ~30s delay)"
 	case "down":
 		apiPath = "/ptz/down"
+		confirmMsg = "Moving down (stream has ~30s delay)"
 	case "left":
 		apiPath = "/ptz/left"
+		confirmMsg = "Moving left (stream has ~30s delay)"
 	case "right":
 		apiPath = "/ptz/right"
+		confirmMsg = "Moving right (stream has ~30s delay)"
 
 	// Zoom
 	case "zoomin":
 		apiPath = "/ptz/zoomin"
+		confirmMsg = "Zooming in (stream has ~30s delay)"
 	case "zoomout":
 		apiPath = "/ptz/zoomout"
+		confirmMsg = "Zooming out (stream has ~30s delay)"
 	case "zoomfull":
 		apiPath = "/ptz/zoomfull"
+		confirmMsg = "Max zoom (stream has ~30s delay)"
 	case "zoommid":
 		apiPath = "/ptz/zoommid"
+		confirmMsg = "Mid zoom (stream has ~30s delay)"
 	case "zoom":
 		apiPath = fmt.Sprintf("/ptz/zoom/%d", cmd.Value)
+		confirmMsg = fmt.Sprintf("Zoom set to %d (stream has ~30s delay)", cmd.Value)
 
 	// Presets
 	case "bridge1", "bridge2", "bridge3":
 		apiPath = "/ptz/preset/" + cmd.Type
+		confirmMsg = "Going to " + cmd.Type + " (stream has ~30s delay)"
 	case "river":
 		apiPath = "/ptz/preset/river"
+		confirmMsg = "Going to river view (stream has ~30s delay)"
 
 	// Override control
 	case "stay", "linger":
 		apiPath = "/ptz/stay"
+		confirmMsg = "Holding position"
 	case "auto":
 		apiPath = "/ptz/release"
+		confirmMsg = "Released to AI tracking"
 	case "pause":
-		apiPath = "/ptz/stay" // Pause = stay
+		apiPath = "/ptz/stay"
+		confirmMsg = "Camera paused"
 
 	case "show.overlay":
 		for _, o := range []string{"target", "pip", "status", "console"} {
 			ch.callNOLO("/show/" + o)
 		}
+		ch.SendChatMessage("All overlays turned ON")
 		log.Printf("[EXECUTE] All overlays enabled")
 		return
 	case "hide.overlay":
 		for _, o := range []string{"target", "pip", "status", "console"} {
 			ch.callNOLO("/hide/" + o)
 		}
+		ch.SendChatMessage("All overlays turned OFF")
 		log.Printf("[EXECUTE] All overlays disabled")
 		return
 	// Overlay toggles (#show.target, #hide.pip, etc.)
@@ -350,9 +367,11 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 		if strings.HasPrefix(cmd.Type, "show.") {
 			overlay := strings.TrimPrefix(cmd.Type, "show.")
 			apiPath = "/show/" + overlay
+			confirmMsg = overlay + " overlay ON"
 		} else if strings.HasPrefix(cmd.Type, "hide.") {
 			overlay := strings.TrimPrefix(cmd.Type, "hide.")
 			apiPath = "/hide/" + overlay
+			confirmMsg = overlay + " overlay OFF"
 		} else {
 			log.Printf("[EXECUTE] Unknown command: %s", cmd.Type)
 			return
@@ -364,6 +383,9 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 		log.Printf("[EXECUTE_ERROR] %s failed: %v", cmd.Type, err)
 	} else {
 		log.Printf("[EXECUTE] %s from %s - OK", cmd.Type, cmd.User)
+		if confirmMsg != "" {
+			ch.SendChatMessage(confirmMsg)
+		}
 	}
 }
 
