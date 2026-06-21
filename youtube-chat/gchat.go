@@ -333,6 +333,12 @@ func (ch *CommandHandler) executeCommand(cmd Command) {
 	case "stay", "linger":
 		apiPath = "/ptz/stay"
 		confirmMsg = "Holding position"
+	case "park":
+		apiPath = "/ptz/park"
+		confirmMsg = "Camera parked - AI tracking OFF until #unpark"
+	case "unpark":
+		apiPath = "/ptz/unpark"
+		confirmMsg = "Camera unparked - AI tracking resumed"
 	case "auto":
 		apiPath = "/ptz/release"
 		confirmMsg = "Released to AI tracking"

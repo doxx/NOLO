@@ -2724,6 +2724,28 @@ func startAPIServer(csm *ptz.CameraStateManager, si *tracking.SpatialIntegration
 		})
 	})
 
+	// Park - hold position indefinitely until unparked
+	mux.HandleFunc("/ptz/park", func(w http.ResponseWriter, r *http.Request) {
+		csm.SetManualOverride(time.Now().Add(24 * time.Hour))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"command": "park",
+			"message": "Camera parked - AI tracking disabled until #unpark",
+		})
+	})
+
+	// Unpark / Release - cancel override immediately
+	mux.HandleFunc("/ptz/unpark", func(w http.ResponseWriter, r *http.Request) {
+		csm.ClearManualOverride()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"command": "unpark",
+			"message": "Camera unparked - AI tracking resumed",
+		})
+	})
+
 	// Release - cancel override immediately
 	mux.HandleFunc("/ptz/release", func(w http.ResponseWriter, r *http.Request) {
 		csm.ClearManualOverride()
