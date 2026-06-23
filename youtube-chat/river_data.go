@@ -30,7 +30,7 @@ const (
 	cameraLon = -80.1890
 
 	// Detection radius in nautical miles
-	detectionRadius = 0.2 // 0.2nm = ~370 meters = ~1,215 feet
+	detectionRadius = 0.5 // 0.5nm = ~926 meters = ~3,038 feet
 )
 
 // SegmentEvent is a timestamped event for video description enrichment
