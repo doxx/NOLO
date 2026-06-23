@@ -3833,7 +3833,6 @@ func setupFFmpeg(pictureSize string) *exec.Cmd {
 func captureFrames(webcam *gocv.VideoCapture, streamURL string, frameChan chan<- FrameData, errorChan chan<- error, stats *PipelineStats) {
 	frameSequence := int64(0)
 	lastFrame := gocv.NewMat()
-	hasLastFrame := false
 	defer lastFrame.Close()
 
 	for {
@@ -3849,26 +3848,12 @@ func captureFrames(webcam *gocv.VideoCapture, streamURL string, frameChan chan<-
 
 			reconnected := false
 			for attempt := 1; attempt <= 60; attempt++ {
-				debugMsg("RTSP_RECONNECT", fmt.Sprintf("Attempt %d/60 - feeding last frame while retrying...", attempt))
+				debugMsg("RTSP_RECONNECT", fmt.Sprintf("Attempt %d/60 - waiting 5s before retry...", attempt))
 
-				if hasLastFrame && !lastFrame.Empty() {
-					for tick := 0; tick < 150; tick++ {
-						clone := gocv.NewMat()
-						lastFrame.CopyTo(&clone)
-						trackMatAlloc("capture")
-						fd := FrameData{frame: clone, sequence: frameSequence, timestamp: time.Now()}
-						select {
-						case frameChan <- fd:
-							frameSequence++
-						default:
-							clone.Close()
-							trackMatClose("capture")
-						}
-						time.Sleep(33 * time.Millisecond)
-					}
-				} else {
-					time.Sleep(5 * time.Second)
-				}
+				// Wait before retry. Do NOT flood the frame channel with cloned
+				// last-frames - that fills the FFmpeg write queue and causes OOM
+				// (12.2MB/frame x queue depth = multi-GB memory spike).
+				time.Sleep(5 * time.Second)
 
 				newWebcam, err := gocv.VideoCaptureFile(streamURL)
 				if err != nil {
@@ -3910,7 +3895,6 @@ func captureFrames(webcam *gocv.VideoCapture, streamURL string, frameChan chan<-
 
 		if frameSequence%30 == 0 {
 			img.CopyTo(&lastFrame)
-			hasLastFrame = true
 		}
 
 		frameData := FrameData{
