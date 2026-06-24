@@ -21,7 +21,7 @@ Why build this software? While everyone uses AI to enable code, I'm using code t
 This camera system represents a microcosm of where I believe all technology is heading. We're transitioning from AI as a separate tool to AI as an integrated nervous system within traditional hardware. Consider the implications:
 
 **Today**: A security camera records video that humans review later, maybe in some conditions has movement or basic object detection on cameras that do not move. Other cases uses offload to a cloud service to do any sort of AI processing.   
-**Tomorrow**: Devices that *think*, track, analyze, and make decisions in real-time while seamlessly integrating with cloud-based reasoning systems. It's going to happene everywhere, children's toys, cars, and even the kitchen. 
+**Tomorrow**: Devices that *think*, track, analyze, and make decisions in real-time while seamlessly integrating with cloud-based reasoning systems. It's going to happen everywhere, children's toys, cars, and even the kitchen. 
 
 But this extends far beyond cameras. Imagine:
 - **Smart kitchens** where sensor-aware cookware communicates thermal dynamics, moisture levels, and chemical changes to AI models embedded in ovens and ranges, automatically adjusting cooking parameters in real-time
